@@ -1018,7 +1018,7 @@ repository_overrides:
 
 Formatting fields are `commit.branch_pattern`, `commit.branch_replacement`, `commit.fix_message`, and `pr.title_format`; each retains the same fail-closed validation as its global or repository-config equivalent.
 A `commit.branch_replacement` must be paired with `commit.branch_pattern` in the same override.
-Precedence is explicit: `.no-mistakes.yaml` wins for every field it sets, then a matching machine-local override, then the plain global value, then the built-in default.
+Precedence for these formatting fields is explicit: `.no-mistakes.yaml` wins for every field it sets, then a matching machine-local override, then the plain global value, then the built-in default.
 As with the global replacement, a repository `commit.branch_pattern` replaces the matching machine-local pattern and clears its replacement.
 Repositories matching no block keep existing global and built-in behavior.
 

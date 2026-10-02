@@ -520,8 +520,9 @@ const (
 	// MaxReviewPathInstructions is the largest number of path_instructions
 	// entries a review prompt may carry.
 	MaxReviewPathInstructions = 32
-	// MaxReviewPathInstructionsBytes is the largest review-prompt section
-	// path_instructions may produce, measured by ReviewPathInstructionsBytes.
+	// MaxReviewPathInstructionsBytes is the most review-prompt bytes the
+	// path_instructions sections of every source may produce together, each
+	// measured like ReviewPathInstructionsBytes.
 	// It leaves room for the entry cap to be reached with a rule of ordinary
 	// length, so neither cap makes the other unusable.
 	MaxReviewPathInstructionsBytes = 16384
