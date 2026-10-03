@@ -920,7 +920,7 @@ The step log names the source of every rule it applied or skipped.
 
 The entry and byte limits apply to the combined set from all three sources, because they share one review prompt.
 This global list together with each `repository_overrides` list is checked when the config loads.
-The repository's trusted list changes independently, so the combined set is checked again when each run starts: a run whose combined rules exceed a limit fails before any step runs, with an error naming each source's entry count, rather than silently dropping a rule.
+The repository's trusted list changes independently, so the combined set is checked again when each run starts and when a run is recovered after a daemon restart: a run whose combined rules exceed a limit fails before any step runs or resumes, with an error naming each source's entry count, rather than silently dropping a rule.
 Shorten or remove your machine-local entries to fix it.
 
 Only `path_instructions` is accepted under this block. `review.conversation` stays a repository decision, because an open question parks the gate.
