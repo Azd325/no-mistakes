@@ -243,10 +243,10 @@ When set, telemetry sends events to this host's `/api/send` endpoint. If it is u
 
 Override or enable the telemetry website ID.
 
-|         |                                                                         |
-| ------- | ----------------------------------------------------------------------- |
-| Type    | `string`                                                                |
-| Default | embedded in Makefile and release builds; unset in unembedded dev builds |
+|         |                                                                                     |
+| ------- | ----------------------------------------------------------------------------------- |
+| Type    | `string`                                                                            |
+| Default | embedded in Makefile, Nix flake, and release builds; unset in unembedded dev builds |
 
 When set, telemetry uses this website ID at runtime. If it is unset in a dev build, `no-mistakes` also checks a repo-local `.env` file for `NO_MISTAKES_UMAMI_WEBSITE_ID`. If no runtime value is found, it falls back to any website ID embedded at build time.
 
