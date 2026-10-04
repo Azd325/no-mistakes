@@ -145,10 +145,7 @@ func defaultUpdater(stdout, stderr io.Writer) (*updater, error) {
 }
 
 func inNixStore(path string) bool {
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		path = resolved
-	}
-	rel, err := filepath.Rel(nixStoreDir, path)
+	rel, err := filepath.Rel(nixStoreDir, resolveExecutablePath(path))
 	return err == nil && rel != "." && filepath.IsLocal(rel)
 }
 
