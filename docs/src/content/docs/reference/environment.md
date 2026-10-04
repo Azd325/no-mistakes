@@ -168,7 +168,7 @@ Disable background update checks.
 | Type    | `1` to disable, anything else to leave enabled |
 | Default | unset (checks enabled)                         |
 
-Update checks run on every CLI invocation except `update` itself and version queries (`--version` / `-v`, which stay side-effect-free), fetch the GitHub release-asset channel manifest, cache the result in `$NM_HOME/update-check.json`, and print a one-line notification to stderr when a newer version is available. Dev builds (non-semver versions) suppress the check automatically.
+Update checks run on every CLI invocation except `update` itself and version queries (`--version` / `-v`, which stay side-effect-free), fetch the GitHub release-asset channel manifest, cache the result in `$NM_HOME/update-check.json`, and print a one-line notification to stderr when a newer version is available. Dev builds (non-semver versions) and binaries that resolve into `/nix/store` suppress the check automatically.
 
 ## `XDG_DATA_HOME`
 
