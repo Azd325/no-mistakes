@@ -538,6 +538,9 @@ func newDaemonStartCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if err := ipc.CheckEndpointPath(p.Socket()); err != nil {
+					return err
+				}
 				if err := p.EnsureDirs(); err != nil {
 					return err
 				}
@@ -635,6 +638,9 @@ func newDaemonStatusCmd() *cobra.Command {
 			return trackCommand("daemon.status", func() error {
 				p, err := paths.New()
 				if err != nil {
+					return err
+				}
+				if err := ipc.CheckEndpointPath(p.Socket()); err != nil {
 					return err
 				}
 				alive, err := daemonIsRunningFn(p)
