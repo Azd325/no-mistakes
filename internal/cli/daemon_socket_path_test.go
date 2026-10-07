@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ func TestDaemonGateHelpersReportSocketPathTooLongThroughShortLink(t *testing.T) 
 	t.Setenv("NM_HOME", link)
 
 	wantSocket := filepath.Join(realRoot, "socket")
+	wantLength := fmt.Sprintf("is %d bytes", len(wantSocket))
 	for _, args := range [][]string{
 		{"daemon", "admit-push", "--gate", gate},
 		{"daemon", "notify-push", "--gate", gate, "--ref", "refs/heads/x", "--old", "0", "--new", "1"},
@@ -34,7 +36,7 @@ func TestDaemonGateHelpersReportSocketPathTooLongThroughShortLink(t *testing.T) 
 			t.Fatalf("%v: expected an error", args)
 		}
 		msg := out + err.Error()
-		for _, want := range []string{wantSocket, "NM_HOME", "physical"} {
+		for _, want := range []string{wantSocket, wantLength, "-byte limit", "NM_HOME", "physical"} {
 			if !strings.Contains(msg, want) {
 				t.Errorf("%v: output %q does not mention %q", args, msg, want)
 			}
