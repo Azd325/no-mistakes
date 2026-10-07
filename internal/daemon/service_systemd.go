@@ -73,6 +73,16 @@ func stopSystemdUserService(p *paths.Paths) error {
 	return nil
 }
 
+func removeSystemdUserService(p *paths.Paths) error {
+	if _, err := serviceCommandRunner("systemctl", "--user", "disable", systemdServiceName(p)); err != nil {
+		return fmt.Errorf("systemctl disable: %w", err)
+	}
+	if err := os.Remove(systemdUserServicePath(p)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return reloadManagedServiceDefinition(p)
+}
+
 func systemdUserServicePath(p *paths.Paths) string {
 	home, err := serviceUserHomeDir()
 	if err != nil {

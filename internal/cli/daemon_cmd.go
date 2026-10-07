@@ -20,10 +20,12 @@ import (
 )
 
 var (
-	daemonRun         = daemon.Run
-	daemonStartFn     = daemon.Start
-	daemonStopFn      = daemon.Stop
-	daemonIsRunningFn = daemon.IsRunning
+	daemonRun               = daemon.Run
+	daemonStartFn           = daemon.Start
+	daemonStopFn            = daemon.Stop
+	daemonUninstallFn       = daemon.Uninstall
+	daemonLaunchAgentPathFn = daemon.InstalledLaunchAgentPath
+	daemonIsRunningFn       = daemon.IsRunning
 )
 
 func newDaemonCmd() *cobra.Command {
@@ -34,6 +36,7 @@ func newDaemonCmd() *cobra.Command {
 
 	cmd.AddCommand(newDaemonStartCmd())
 	cmd.AddCommand(newDaemonStopCmd())
+	cmd.AddCommand(newDaemonUninstallCmd())
 	cmd.AddCommand(newDaemonRestartCmd())
 	cmd.AddCommand(newDaemonStatusCmd())
 	cmd.AddCommand(newDaemonRunCmd())
@@ -570,11 +573,47 @@ func newDaemonStopCmd() *cobra.Command {
 					return err
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "  %s daemon stopped\n", sGreen.Render("✓"))
+				if path := daemonLaunchAgentPathFn(p); path != "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  Service starts again at the next login; LaunchAgent remains at %s. Remove it with `no-mistakes daemon uninstall`.\n", path)
+				}
 				return nil
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "stop the daemon even when pipeline runs are active")
+	return cmd
+}
+
+func newDaemonUninstallCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Stop and remove this instance's managed daemon service",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			logLifecycleInvocation("daemon.uninstall", force)
+			return trackCommand("daemon.uninstall", func() error {
+				p, err := paths.New()
+				if err != nil {
+					return err
+				}
+				if err := guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon uninstall", force); err != nil {
+					return err
+				}
+				definition, err := daemonUninstallFn(p)
+				if err != nil {
+					return err
+				}
+				if definition == "" {
+					fmt.Fprintf(cmd.OutOrStdout(), "  No managed daemon service is installed for NM_HOME %s.\n", p.Root())
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s removed managed daemon service: %s\n", sGreen.Render("✓"), definition)
+				}
+				return nil
+			})
+		},
+	}
+	cmd.Flags().BoolVar(&force, "force", false, "uninstall the daemon service even when pipeline runs are active")
 	return cmd
 }
 

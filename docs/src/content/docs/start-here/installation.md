@@ -130,14 +130,15 @@ It does not remove repo-local agent skill files created by `no-mistakes init`.
 
 ## Uninstall
 
-Stop the daemon, delete the binary, and clear state:
+Remove the managed daemon service, delete the binary, and clear state:
 
 ```sh
-no-mistakes daemon stop
+no-mistakes daemon uninstall
+no-mistakes daemon stop # also stops a detached daemon, if present
 rm -f ~/.local/bin/no-mistakes /usr/local/bin/no-mistakes
 rm -rf ~/.no-mistakes
 ```
 
 If you configured [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots), also delete the run worktree directories it placed outside `~/.no-mistakes`.
 
-On macOS, also remove `~/Library/LaunchAgents/com.kunchenguid.no-mistakes.daemon.*.plist`. On Linux, also remove `~/.config/systemd/user/no-mistakes-daemon-*.service`. On Windows, remove the `no-mistakes-daemon-*` Task Scheduler task.
+`daemon uninstall` removes only the service for the current `NM_HOME`: the LaunchAgent plist on macOS, the systemd user unit on Linux, or the Task Scheduler task on Windows. Repeat it with each instance's `NM_HOME` if you installed multiple services.
