@@ -23,9 +23,6 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	globalConfig := filepath.Join(globalConfigDir, "gitconfig")
-	if err := os.WriteFile(globalConfig, []byte("[commit]\n\tgpgsign = false\n[tag]\n\tgpgsign = false\n"), 0o644); err != nil {
-		panic(err)
-	}
 	os.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
 	cleanup, err := stepstest.Init()
 	if err != nil {
