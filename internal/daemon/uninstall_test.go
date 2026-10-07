@@ -170,3 +170,32 @@ func TestInstalledLaunchAgentPathNamesOnlyAnInstalledMacOSService(t *testing.T) 
 		t.Fatalf("non-macOS service path = %q", got)
 	}
 }
+
+func TestUninstallAsksADaemonOutsideTheServiceToShutDown(t *testing.T) {
+	p, _ := startTestDaemon(t)
+	defer stubServiceRuntime(t)()
+	runtimeGOOS = "darwin"
+	home := t.TempDir()
+	serviceUserHomeDir = func() (string, error) { return home, nil }
+	serviceCurrentUser = func() (*user.User, error) { return &user.User{Uid: "501"}, nil }
+	definition := launchAgentPath(p)
+	if err := os.MkdirAll(filepath.Dir(definition), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(definition, []byte("service"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	serviceCommandRunner = func(string, ...string) ([]byte, error) { return nil, nil }
+	daemonKillPID = func(pid int) error {
+		t.Fatalf("daemon was killed by pid %d instead of asked to shut down", pid)
+		return nil
+	}
+	t.Cleanup(func() { daemonKillPID = killPID })
+
+	if got, err := Uninstall(p); err != nil || got != definition {
+		t.Fatalf("Uninstall = %q, %v; want %q", got, err, definition)
+	}
+	if alive, _ := IsRunning(p); alive {
+		t.Fatal("daemon still running after uninstall")
+	}
+}
