@@ -20,12 +20,13 @@ import (
 )
 
 var (
-	daemonRun               = daemon.Run
-	daemonStartFn           = daemon.Start
-	daemonStopFn            = daemon.Stop
-	daemonUninstallFn       = daemon.Uninstall
-	daemonLaunchAgentPathFn = daemon.InstalledLaunchAgentPath
-	daemonIsRunningFn       = daemon.IsRunning
+	daemonRun                  = daemon.Run
+	daemonStartFn              = daemon.Start
+	daemonStopFn               = daemon.Stop
+	daemonUninstallFn          = daemon.Uninstall
+	daemonUninstallSupportedFn = daemon.UninstallSupported
+	daemonLaunchAgentPathFn    = daemon.InstalledLaunchAgentPath
+	daemonIsRunningFn          = daemon.IsRunning
 )
 
 func newDaemonCmd() *cobra.Command {
@@ -593,6 +594,10 @@ func newDaemonUninstallCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			logLifecycleInvocation("daemon.uninstall", force)
 			return trackCommand("daemon.uninstall", func() error {
+				if !daemonUninstallSupportedFn() {
+					fmt.Fprintln(cmd.OutOrStdout(), "  No service removal is available on this platform; daemon uninstall changed nothing.")
+					return nil
+				}
 				p, err := paths.New()
 				if err != nil {
 					return err

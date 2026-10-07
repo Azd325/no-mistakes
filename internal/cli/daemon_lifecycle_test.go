@@ -115,7 +115,10 @@ func TestLifecycleCommandsWriteCallerAttributionToCLILog(t *testing.T) {
 	daemonStopFn = func(*paths.Paths) error { return nil }
 	daemonStartFn = func(*paths.Paths) error { return nil }
 	daemonUninstallFn = func(*paths.Paths) (string, error) { return "", nil }
+	prevSupported := daemonUninstallSupportedFn
+	daemonUninstallSupportedFn = func() bool { return true }
 	t.Cleanup(func() {
+		daemonUninstallSupportedFn = prevSupported
 		daemonStopFn = prevStop
 		daemonStartFn = prevStart
 		daemonUninstallFn = prevUninstall

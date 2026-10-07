@@ -9,8 +9,9 @@ import (
 
 func TestDaemonUninstallReportsRemovedDefinitionAndNoService(t *testing.T) {
 	t.Setenv("NM_HOME", t.TempDir())
-	prev := daemonUninstallFn
-	t.Cleanup(func() { daemonUninstallFn = prev })
+	prev, prevSupported := daemonUninstallFn, daemonUninstallSupportedFn
+	t.Cleanup(func() { daemonUninstallFn, daemonUninstallSupportedFn = prev, prevSupported })
+	daemonUninstallSupportedFn = func() bool { return true }
 	for _, definition := range []string{"/tmp/home/Library/LaunchAgents/daemon.plist", ""} {
 		t.Run(definition, func(t *testing.T) {
 			called := false
@@ -43,8 +44,9 @@ func TestDaemonUninstallRefusesActiveRunsUnlessForced(t *testing.T) {
 	nmHome := t.TempDir()
 	t.Setenv("NM_HOME", nmHome)
 	createLifecycleGuardRuns(t, paths.WithRoot(nmHome))
-	prev := daemonUninstallFn
-	t.Cleanup(func() { daemonUninstallFn = prev })
+	prev, prevSupported := daemonUninstallFn, daemonUninstallSupportedFn
+	t.Cleanup(func() { daemonUninstallFn, daemonUninstallSupportedFn = prev, prevSupported })
+	daemonUninstallSupportedFn = func() bool { return true }
 	called := false
 	daemonUninstallFn = func(*paths.Paths) (string, error) {
 		called = true
@@ -80,5 +82,22 @@ func TestDaemonStopNamesRetainedLaunchAgentAndUninstallCommand(t *testing.T) {
 	out, err = executeCmd("daemon", "stop")
 	if err != nil || strings.Contains(out, "next login") {
 		t.Fatalf("no retained plist should mean no login notice: %q, %v", out, err)
+	}
+}
+
+func TestDaemonUninstallOnUnsupportedPlatformChangesNothingAndSucceeds(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	createLifecycleGuardRuns(t, paths.WithRoot(nmHome))
+	prev, prevSupported := daemonUninstallFn, daemonUninstallSupportedFn
+	t.Cleanup(func() { daemonUninstallFn, daemonUninstallSupportedFn = prev, prevSupported })
+	daemonUninstallSupportedFn = func() bool { return false }
+	daemonUninstallFn = func(*paths.Paths) (string, error) {
+		t.Fatal("unsupported platform must not uninstall")
+		return "", nil
+	}
+	out, err := executeCmd("daemon", "uninstall")
+	if err != nil || !strings.Contains(out, "No service removal is available on this platform") {
+		t.Fatalf("unsupported uninstall: error=%v output=%q", err, out)
 	}
 }
