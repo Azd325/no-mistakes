@@ -12,7 +12,7 @@ import (
 )
 
 func TestDaemonStopRefusesWithActiveRunsAndListsThem(t *testing.T) {
-	nmHome := t.TempDir()
+	nmHome := makeSocketSafeTempDir(t)
 	t.Setenv("NM_HOME", nmHome)
 	createLifecycleGuardRuns(t, paths.WithRoot(nmHome))
 
@@ -47,7 +47,7 @@ func TestDaemonStopRefusesWithActiveRunsAndListsThem(t *testing.T) {
 }
 
 func TestDaemonStopForceOverridesActiveRunGuard(t *testing.T) {
-	nmHome := t.TempDir()
+	nmHome := makeSocketSafeTempDir(t)
 	t.Setenv("NM_HOME", nmHome)
 	createLifecycleGuardRuns(t, paths.WithRoot(nmHome))
 
@@ -72,7 +72,7 @@ func TestDaemonStopForceOverridesActiveRunGuard(t *testing.T) {
 }
 
 func TestDaemonRestartRefusesWithActiveRuns(t *testing.T) {
-	nmHome := t.TempDir()
+	nmHome := makeSocketSafeTempDir(t)
 	t.Setenv("NM_HOME", nmHome)
 	createLifecycleGuardRuns(t, paths.WithRoot(nmHome))
 
@@ -106,7 +106,7 @@ func TestDaemonRestartRefusesWithActiveRuns(t *testing.T) {
 }
 
 func TestLifecycleCommandsWriteCallerAttributionToCLILog(t *testing.T) {
-	nmHome := t.TempDir()
+	nmHome := makeSocketSafeTempDir(t)
 	t.Setenv("NM_HOME", nmHome)
 
 	prevStop := daemonStopFn

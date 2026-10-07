@@ -593,6 +593,9 @@ func newDaemonRestartCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				if err := ipc.CheckEndpointPath(p.Socket()); err != nil {
+					return err
+				}
 				if err := p.EnsureDirs(); err != nil {
 					return err
 				}
