@@ -438,8 +438,11 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 			previousArtifact = rendered
 		}
 		if outcome := buildTestingOutcomeLine(line, stepRounds); shouldRenderTestingOutcome(opts, wroteSummary, outcome) {
-			b.WriteString("- ")
-			b.WriteString(outcome)
+			outcomeLine := "- " + outcome
+			if needsArtifactBlockSeparator(previousArtifact, outcomeLine) {
+				b.WriteString("\n")
+			}
+			b.WriteString(outcomeLine)
 			b.WriteString("\n")
 		}
 
@@ -450,13 +453,9 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 }
 
 func needsArtifactBlockSeparator(previous, current string) bool {
-	previous = strings.TrimSpace(previous)
-	current = strings.TrimSpace(current)
-	previousIsDetails := strings.HasPrefix(previous, "<details>")
-	currentIsDetails := strings.HasPrefix(current, "<details>")
-	previousIsBullet := strings.HasPrefix(previous, "- Evidence:")
-	currentIsBullet := strings.HasPrefix(current, "- Evidence:")
-	return previousIsDetails && currentIsBullet || previousIsBullet && currentIsDetails
+	previousEndsDetails := strings.HasSuffix(strings.TrimSpace(previous), "</details>")
+	currentStartsDetails := strings.HasPrefix(strings.TrimSpace(current), "<details>")
+	return previousEndsDetails != currentStartsDetails
 }
 
 func shouldRenderTestingOutcome(opts testingSummaryOptions, wroteSummary bool, outcome string) bool {
