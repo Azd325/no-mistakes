@@ -2074,3 +2074,34 @@ func TestGetChecksTreatsNoChecksReportedOnStderrAsEmpty(t *testing.T) {
 		t.Fatalf("checks = %+v, want none", checks)
 	}
 }
+
+func TestStdoutOnlyFailureDetail(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		stdout string
+		stderr string
+		want   string
+	}{
+		{name: "stderr only", stderr: "  stderr failure \n", want: "stderr failure"},
+		{name: "stdout only", stdout: "\n stdout failure  \n", want: "stdout failure"},
+		{name: "both prefers stderr", stdout: "stdout noise\n", stderr: "stderr failure\n", want: "stderr failure"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			cmd := githubTestCmdFactory(map[string]githubTestResponse{
+				"gh probe": {stdout: tt.stdout, stderr: tt.stderr, code: 1},
+			})(context.Background(), "gh", "probe")
+			_, detail, err := stdoutOnly(cmd)
+			if err == nil {
+				t.Fatal("stdoutOnly() error = nil, want the exit error")
+			}
+			if detail != tt.want {
+				t.Fatalf("detail = %q, want %q", detail, tt.want)
+			}
+		})
+	}
+}
