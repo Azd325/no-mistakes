@@ -274,6 +274,7 @@ func TestPRStep_ClosesFailsInsteadOfSkippingWhenHostUnavailable(t *testing.T) {
 // Trailing punctuation and ordered-list items are ordinary ways to write a
 // standalone closing line; verification must see them.
 func TestClosingKeywordLinesAcceptPunctuationAndOrderedLists(t *testing.T) {
+	t.Parallel()
 	body := "Fixes #4.\n1. Closes #5\n2) Resolves owner/repo#6;\nThis fixes #7 partly.\n"
 	got := strings.Join(extractClosingKeywordLines(body), "|")
 	if got != "Fixes #4.|1. Closes #5|2) Resolves owner/repo#6;" {
