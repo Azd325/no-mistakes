@@ -46,14 +46,14 @@ tail -f ~/.no-mistakes/logs/daemon.log
 
 ### Check for stale artifacts
 
-A leftover socket from an unclean exit no longer blocks startup: the daemon probes the socket path before binding and removes it only when nothing is listening on it.
-A stale PID file can still confuse status reporting:
+A leftover socket and PID file from an unclean exit clear themselves: once the recorded daemon process is provably gone, status checks report the daemon as not running and remove both files (see [Daemon & Worktrees](/no-mistakes/concepts/daemon/)).
+If a command still reports `connect to daemon socket: ... connection refused`, the PID file names a process that is still alive or cannot be verified:
 
 ```sh
 ls -la ~/.no-mistakes/daemon.pid ~/.no-mistakes/socket
 ```
 
-If the PID file points at a process that's no longer running, remove it and run `no-mistakes daemon start` again.
+Check that process, then run `no-mistakes daemon start`.
 
 ### "a no-mistakes daemon is already running for this NM_HOME"
 
