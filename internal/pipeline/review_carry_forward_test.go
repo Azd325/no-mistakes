@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"os"
+	gitexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -232,10 +234,15 @@ func TestExecutor_ReviewCarryForward_NoOpFixKeepsFindingParked(t *testing.T) {
 			}
 			// The fixer writes a commit that does not fix the selected defect.
 			if err := os.WriteFile(filepath.Join(workDir, "unrelated.txt"), []byte("tidy\n"), 0o644); err != nil {
-				t.Fatal(err)
+				return nil, err
 			}
-			execGit(t, workDir, "add", "unrelated.txt")
-			execGit(t, workDir, "commit", "-m", "tidy unrelated code")
+			for _, args := range [][]string{{"add", "unrelated.txt"}, {"commit", "-m", "tidy unrelated code"}} {
+				cmd := gitexec.Command("git", args...)
+				cmd.Dir = workDir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					return nil, fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, out)
+				}
+			}
 			// The rereview reports nothing new and offers no coverage record for
 			// service.go: it did not look there, so nothing about the finding is
 			// proven. Silence may never read as resolution.
@@ -1138,10 +1145,15 @@ func TestExecutor_ReviewCarryForward_AFixRoundCannotWithdraw(t *testing.T) {
 				}, nil
 			}
 			if err := os.WriteFile(filepath.Join(workDir, "unrelated.txt"), []byte("tidy\n"), 0o644); err != nil {
-				t.Fatal(err)
+				return nil, err
 			}
-			execGit(t, workDir, "add", "unrelated.txt")
-			execGit(t, workDir, "commit", "-m", "tidy unrelated code")
+			for _, args := range [][]string{{"add", "unrelated.txt"}, {"commit", "-m", "tidy unrelated code"}} {
+				cmd := gitexec.Command("git", args...)
+				cmd.Dir = workDir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					return nil, fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, out)
+				}
+			}
 			// The rereview never looked at service.go, so it has no coverage
 			// record to clear the selected finding with - and tries to retract
 			// it by name instead.
@@ -1679,10 +1691,15 @@ func TestExecutor_ReviewCarryForward_LatestRiskAssessmentReplacesTheEarlierOne(t
 				}, nil
 			}
 			if err := os.WriteFile(filepath.Join(workDir, "unrelated.txt"), []byte("tidy\n"), 0o644); err != nil {
-				t.Fatal(err)
+				return nil, err
 			}
-			execGit(t, workDir, "add", "unrelated.txt")
-			execGit(t, workDir, "commit", "-m", "tidy unrelated code")
+			for _, args := range [][]string{{"add", "unrelated.txt"}, {"commit", "-m", "tidy unrelated code"}} {
+				cmd := gitexec.Command("git", args...)
+				cmd.Dir = workDir
+				if out, err := cmd.CombinedOutput(); err != nil {
+					return nil, fmt.Errorf("git %s: %w\n%s", strings.Join(args, " "), err, out)
+				}
+			}
 			return &StepOutcome{
 				FixSummary: "tidy unrelated code",
 				Findings:   `{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"the nil deref and cache growth are fixed"}`,
