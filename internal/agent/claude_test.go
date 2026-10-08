@@ -723,6 +723,91 @@ func TestClaudeAgent_CancellationWithBlockedStdinAndInheritedPipesIsBounded(t *t
 	}
 }
 
+// The testdata/claude_*.jsonl streams are recorded from Claude Code 2.1.289
+// against a local stand-in for the API, without the init event.
+func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	for _, tc := range []struct {
+		name         string
+		fixture      string
+		wantAttempts int
+		wantErr      string
+	}{
+		{
+			name:         "terminal 529",
+			fixture:      "claude_terminal_529.jsonl",
+			wantAttempts: claudeMaxRetries + 1,
+			wantErr:      "claude exited: exit status 1: API error status 529: API Error: Repeated 529 Overloaded errors. The API is at capacity \u2014 this is usually temporary. Try again in a moment. If it persists, check your inference gateway (127.0.0.1:48529).",
+		},
+		{
+			name:         "terminal 429",
+			fixture:      "claude_terminal_429.jsonl",
+			wantAttempts: claudeMaxRetries + 1,
+			wantErr:      "claude exited: exit status 1: API error status 429: API Error: Request rejected (429) \u00b7 Number of request tokens has exceeded your per-minute rate limit",
+		},
+		{
+			name:         "recovered 529 then max turns",
+			fixture:      "claude_recovered_529_max_turns.jsonl",
+			wantAttempts: 1,
+			wantErr:      "claude exited: exit status 1: ",
+		},
+		{
+			name:         "prose quoting 429 then max turns",
+			fixture:      "claude_prose_429_max_turns.jsonl",
+			wantAttempts: 1,
+			wantErr:      "claude exited: exit status 1: ",
+		},
+		{
+			name:         "usage limit",
+			fixture:      "claude_usage_limit.jsonl",
+			wantAttempts: 1,
+			wantErr:      "claude exited: exit status 1: API error status 429: You've hit your session limit \u00b7 resets 10:53pm (UTC)",
+		},
+		{
+			name:         "permanent 400",
+			fixture:      "claude_terminal_400.jsonl",
+			wantAttempts: 1,
+			wantErr:      "claude exited: exit status 1: API error status 400: Prompt is too long \u00b7 the request is ~250000 tokens (limit 200000) but this conversation is only ~2372 tokens \u2014 the rest is system prompt, tool definitions, and attachment content. A single-exchange conversation cannot be compacted; reduce attached files/tools or start with less context.",
+		},
+		{
+			name:         "empty stdout and stderr",
+			wantAttempts: 1,
+			wantErr:      "claude exited: exit status 1: ",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := ""
+			if tc.fixture != "" {
+				abs, err := filepath.Abs(filepath.Join("testdata", tc.fixture))
+				if err != nil {
+					t.Fatalf("resolve fixture: %v", err)
+				}
+				fixture = abs
+			}
+			t.Setenv("NM_CLAUDE_STDIN_HELPER", "replay-then-fail")
+			t.Setenv("NM_CLAUDE_STDIN_FIXTURE", fixture)
+			a := newClaudeStdinHelperAgent(t)
+
+			attempts := 0
+			_, err := a.Run(context.Background(), RunOpts{
+				Prompt:    "review",
+				CWD:       t.TempDir(),
+				OnAttempt: func(Attempt) { attempts++ },
+			})
+			if err == nil {
+				t.Fatal("Run succeeded, want the exit error")
+			}
+			if attempts != tc.wantAttempts {
+				t.Errorf("attempts = %d, want %d", attempts, tc.wantAttempts)
+			}
+			if err.Error() != tc.wantErr {
+				t.Errorf("error = %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
 func newClaudeStdinHelperAgent(t *testing.T) *claudeAgent {
 	t.Helper()
 	exe, err := os.Executable()
@@ -766,6 +851,15 @@ func TestClaudeStdinHelper(t *testing.T) {
 		for {
 			time.Sleep(time.Second)
 		}
+	case "replay-then-fail":
+		if fixture := os.Getenv("NM_CLAUDE_STDIN_FIXTURE"); fixture != "" {
+			stream, err := os.ReadFile(fixture)
+			if err != nil {
+				os.Exit(6)
+			}
+			_, _ = os.Stdout.Write(stream)
+		}
+		os.Exit(1)
 	case "read":
 		prompt, err := io.ReadAll(os.Stdin)
 		if err != nil {
