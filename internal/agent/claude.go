@@ -44,7 +44,11 @@ type claudeAPIError struct {
 }
 
 func (e *claudeAPIError) Error() string {
-	return fmt.Sprintf("API error status %d: %s", e.Status, e.Message)
+	message := []rune(e.Message)
+	if len(message) > claudeAPIErrorMessageMaxRunes {
+		message = append(message[:claudeAPIErrorMessageMaxRunes], []rune("...")...)
+	}
+	return fmt.Sprintf("API error status %d: %s", e.Status, string(message))
 }
 
 func (e *claudeAPIError) classify() (string, bool) {
@@ -205,13 +209,9 @@ func (r *claudeResult) terminalAPIError() *claudeAPIError {
 	if err := json.Unmarshal(r.rawEvent, &fields); err != nil || fields.APIErrorStatus == 0 {
 		return nil
 	}
-	message := []rune(strings.Join(strings.Fields(fields.Result), " "))
-	if len(message) > claudeAPIErrorMessageMaxRunes {
-		message = append(message[:claudeAPIErrorMessageMaxRunes], []rune("...")...)
-	}
 	return &claudeAPIError{
 		Status:            fields.APIErrorStatus,
-		Message:           string(message),
+		Message:           strings.Join(strings.Fields(fields.Result), " "),
 		UsageLimitReached: r.usageLimitReached,
 	}
 }

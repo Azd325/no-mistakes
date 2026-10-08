@@ -434,6 +434,10 @@ func TestClaudeRetryClassifier_ReportedAPIErrorDecidesAlone(t *testing.T) {
 			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: "API Error: 429 You exceeded your current quota"}),
 		},
 		{
+			name: "exhausted quota behind the displayed message cut",
+			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: strings.Repeat("x", claudeAPIErrorMessageMaxRunes+50) + " quota exceeded"}),
+		},
+		{
 			name: "permanent status beside transient-looking stderr",
 			err:  claudeExitError(exit, "upstream proxy returned 503", &claudeAPIError{Status: 400, Message: "API Error: 400"}),
 		},
