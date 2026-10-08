@@ -525,6 +525,7 @@ func TestPRStep_OrdinaryUpdateRendersRequestedIssuesOnce(t *testing.T) {
 }
 
 func TestExtractClosingKeywordLinesIgnoresCodeExamples(t *testing.T) {
+	t.Parallel()
 	body := "Closes #1\n\n```md\nCloses #2\n```\n\n    Fixes #3\n\n- Resolves owner/repo#4\n"
 	got := extractClosingKeywordLines(body)
 	if joined := strings.Join(got, ","); joined != "Closes #1,- Resolves owner/repo#4" {
@@ -533,6 +534,7 @@ func TestExtractClosingKeywordLinesIgnoresCodeExamples(t *testing.T) {
 }
 
 func TestIssuesSectionRendersDeterministicQualifiedReferences(t *testing.T) {
+	t.Parallel()
 	sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"2", "10", "owner/repo#3"}}
 	got := issuesSection(sctx, "")
 	want := "## Issues\n\nCloses #2\nCloses #10\nCloses owner/repo#3"
@@ -547,6 +549,7 @@ func TestIssuesSectionRendersDeterministicQualifiedReferences(t *testing.T) {
 // Author text kept verbatim around an owned appendix already closes #2, so
 // the appendix must not repeat it.
 func TestIssuesSectionSkipsReferencesTheAuthorTextAlreadyCloses(t *testing.T) {
+	t.Parallel()
 	sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"2", "3"}}
 	got := issuesSection(sctx, "## Overview\n\nFixes #2\n")
 	if got != "## Issues\n\nCloses #3" {
@@ -560,6 +563,7 @@ func TestIssuesSectionSkipsReferencesTheAuthorTextAlreadyCloses(t *testing.T) {
 // Without --closes nothing is added or inferred, even when the intent names
 // an issue.
 func TestIssuesSectionNeverInfersClosure(t *testing.T) {
+	t.Parallel()
 	sctx := &pipeline.StepContext{UserIntent: "Implement issue #95"}
 	if got := issuesSection(sctx, "Implement issue #95"); got != "" {
 		t.Fatalf("issuesSection() = %q, want empty without --closes", got)
@@ -567,6 +571,7 @@ func TestIssuesSectionNeverInfersClosure(t *testing.T) {
 }
 
 func TestVerifyClosingIssuesFailsWhenLiveBodyDroppedARequestedReference(t *testing.T) {
+	t.Parallel()
 	host := &closingBodyReader{body: "## Issues\n\nCloses #2"}
 	sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"2", "owner/repo#3"}}
 	err := verifyClosingIssues(context.Background(), host, &scm.PR{Number: "1"}, sctx)
@@ -576,6 +581,7 @@ func TestVerifyClosingIssuesFailsWhenLiveBodyDroppedARequestedReference(t *testi
 }
 
 func TestVerifyClosingIssuesDoesNotAcceptReferencePrefix(t *testing.T) {
+	t.Parallel()
 	sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"1"}}
 	err := verifyClosingIssuesInBody("## Issues\n\nCloses #10", sctx)
 	if err == nil || !strings.Contains(err.Error(), "#1") {
@@ -586,6 +592,7 @@ func TestVerifyClosingIssuesDoesNotAcceptReferencePrefix(t *testing.T) {
 // A bare mention is not a closing reference: verification requires a
 // closing keyword line for the requested target.
 func TestVerifyClosingIssuesRejectsBareMention(t *testing.T) {
+	t.Parallel()
 	sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"95"}}
 	err := verifyClosingIssuesInBody("## Intent\n\nImplement issue #95\n\nRefs #95", sctx)
 	if err == nil || !strings.Contains(err.Error(), "Closes #95") {
@@ -1195,6 +1202,7 @@ func TestUnwrapNestedPRBody(t *testing.T) {
 }
 
 func TestAppendGeneratedSections_StripsAgentGeneratedSections(t *testing.T) {
+	t.Parallel()
 	body := "## Summary\n\n- improve PR descriptions\n\n## Testing\n\n- model-added testing\n\n## Risk Assessment\n\nold risk\n\n## Pipeline\n\nold pipeline"
 
 	got := appendGeneratedSections(
@@ -1357,6 +1365,7 @@ func TestPRBodyBudgetPromptSection(t *testing.T) {
 }
 
 func TestAppendGeneratedSections_StripsCommonHeadingVariants(t *testing.T) {
+	t.Parallel()
 	body := "## Summary\n\n- improve PR descriptions\n\n## tests:\n\n- model-added testing\n\n## risk assessment\n\nold risk\n\n## Pipeline:\n\nold pipeline"
 
 	got := appendGeneratedSections(
@@ -1381,6 +1390,7 @@ func TestAppendGeneratedSections_StripsCommonHeadingVariants(t *testing.T) {
 }
 
 func TestAppendGeneratedSections_LeavesUnderLimitBodyByteIdentical(t *testing.T) {
+	t.Parallel()
 	body := "## What Changed\n\n- improve PR descriptions"
 	riskLine := "✅ Low: deterministic PR body assembly only"
 	testingMD := "## Testing\n\n- go test ./internal/pipeline/steps"
@@ -1395,6 +1405,7 @@ func TestAppendGeneratedSections_LeavesUnderLimitBodyByteIdentical(t *testing.T)
 }
 
 func TestAppendGeneratedSections_TruncatesPipelineUpdatesBeforeGitHubLimit(t *testing.T) {
+	t.Parallel()
 	body := "## What Changed\n\n- essential summary survives\n\n" + strings.Repeat("essential details stay intact\n", 350)
 	riskLine := "✅ Low: generated PR body length guard only"
 	testingMD := "## Testing\n\n- go test ./internal/pipeline/steps"
@@ -1426,6 +1437,7 @@ func TestAppendGeneratedSections_TruncatesPipelineUpdatesBeforeGitHubLimit(t *te
 }
 
 func TestAppendGeneratedSections_TruncatesBitbucketHeadingGroups(t *testing.T) {
+	t.Parallel()
 	body := "## What Changed\n\n- essential summary survives\n\n" + strings.Repeat("essential details stay intact\n", 350)
 	riskLine := "✅ Low: generated PR body length guard only"
 	testingMD := "## Testing\n\nEvidence was collected."
@@ -1453,6 +1465,7 @@ func TestAppendGeneratedSections_TruncatesBitbucketHeadingGroups(t *testing.T) {
 }
 
 func TestAppendGeneratedSections_RetainsPipelineAttestationWhenTruncated(t *testing.T) {
+	t.Parallel()
 	steps := []*db.StepResult{
 		{StepName: types.StepReview, Status: types.StepStatusCompleted},
 		{StepName: types.StepTest, Status: types.StepStatusSkipped},
@@ -1470,6 +1483,7 @@ func TestAppendGeneratedSections_RetainsPipelineAttestationWhenTruncated(t *test
 }
 
 func TestAppendGeneratedSections_RetainsAttestationWhenEssentialSectionsOverflow(t *testing.T) {
+	t.Parallel()
 	steps := []*db.StepResult{
 		{StepName: types.StepReview, Status: types.StepStatusCompleted},
 		{StepName: types.StepTest, Status: types.StepStatusFailed},
@@ -1494,6 +1508,7 @@ func TestAppendGeneratedSections_RetainsAttestationWhenEssentialSectionsOverflow
 }
 
 func TestAppendGeneratedSections_ExtremePipelineOverflowStillFitsLimit(t *testing.T) {
+	t.Parallel()
 	body := "## What Changed\n\n- essential summary survives"
 	rounds := make([]string, 0, 1000)
 	for i := 1; i <= 1000; i++ {
@@ -1513,6 +1528,7 @@ func TestAppendGeneratedSections_ExtremePipelineOverflowStillFitsLimit(t *testin
 }
 
 func TestAppendGeneratedSections_TruncatesOversizedLatestPipelineUpdate(t *testing.T) {
+	t.Parallel()
 	body := "## What Changed\n\n- essential summary survives"
 	latest := "review round 003 - newest oversized update\n" + strings.Repeat("latest detail line stays whole\n", 3000)
 
@@ -1566,6 +1582,7 @@ func TestAppendGeneratedSections_TruncatesOversizedLatestPipelineUpdate(t *testi
 }
 
 func TestAppendGeneratedSections_TruncatesSingleLineLatestPipelineUpdate(t *testing.T) {
+	t.Parallel()
 	body := "## What Changed\n\n- essential summary survives"
 	latest := "review round 001 - newest single-line oversized update " + strings.Repeat("x", maxPullRequestBodyBytes)
 
@@ -1584,6 +1601,7 @@ func TestAppendGeneratedSections_TruncatesSingleLineLatestPipelineUpdate(t *test
 }
 
 func TestAppendGeneratedSections_TrimsBodyToKeepPipelineOmissionMarker(t *testing.T) {
+	t.Parallel()
 	baseBody := "## What Changed\n\n- essential summary survives\n\n"
 	riskLine := "✅ Low: generated PR body length guard only"
 	testingMD := "## Testing\n\n- go test ./internal/pipeline/steps"
@@ -1619,6 +1637,7 @@ func TestAppendGeneratedSections_TrimsBodyToKeepPipelineOmissionMarker(t *testin
 }
 
 func TestAppendGeneratedSections_TrimsBodyToKeepLatestPipelineUpdate(t *testing.T) {
+	t.Parallel()
 	baseBody := "## What Changed\n\n- essential summary survives\n\n"
 	riskLine := "✅ Low: generated PR body length guard only"
 	testingMD := "## Testing\n\n- go test ./internal/pipeline/steps"
@@ -1671,6 +1690,7 @@ func TestAppendGeneratedSections_TrimsBodyToKeepLatestPipelineUpdate(t *testing.
 }
 
 func TestBuildPRBody_TrimsOversizedLaterSectionWithoutDroppingSmallEssentials(t *testing.T) {
+	t.Parallel()
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Keep the release notes readable."
 	body := strings.Join([]string{
@@ -1707,6 +1727,7 @@ func TestBuildPRBody_TrimsOversizedLaterSectionWithoutDroppingSmallEssentials(t 
 }
 
 func TestAssembleDraftPRBody_GitHubKeepsIssuesWithinTheByteBudget(t *testing.T) {
+	t.Parallel()
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.ClosingIssueRefs = []string{"42"}
 	body := "## What Changed\n\n- essential summary survives\n\n" + strings.Repeat("x", maxPullRequestBodyBytes)
@@ -1720,6 +1741,7 @@ func TestAssembleDraftPRBody_GitHubKeepsIssuesWithinTheByteBudget(t *testing.T) 
 }
 
 func TestAppendGeneratedSections_TruncatesUTF8OnValidBoundary(t *testing.T) {
+	t.Parallel()
 	marker := essentialPRBodyTruncationMarker()
 	got := truncateTextAtLineBoundary(strings.Repeat("界", 10), len("\n\n")+len(marker)+1, marker)
 	if !utf8.ValidString(got) {
@@ -1754,6 +1776,7 @@ func TestAppendGeneratedSections_TruncatesUTF8OnValidBoundary(t *testing.T) {
 }
 
 func TestBuildPRBody_TruncatesOversizedIntentBeforeGeneratedSections(t *testing.T) {
+	t.Parallel()
 	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
 	sctx.UserIntent = "Keep generated sections visible.\n" + strings.Repeat("oversized intent context line\n", 2500)
 	body := "## What Changed\n\n- essential summary survives"

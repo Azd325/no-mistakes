@@ -399,6 +399,7 @@ func TestDocumentStep_NoStructuredOutput_FailsClosed(t *testing.T) {
 }
 
 func TestDocumentStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
 		name: "hanging-document-agent",
