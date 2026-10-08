@@ -1659,3 +1659,61 @@ func TestExecutor_ReviewCarryForward_ARecoveredRoundInheritsNoRetractionRecord(t
 	}
 	waitExecutorDone(t, done)
 }
+
+func TestExecutor_ReviewCarryForward_LatestRiskAssessmentReplacesTheEarlierOne(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+
+	round := 0
+	step := &adaptiveCallStep{
+		name: types.StepReview,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			round++
+			if round == 1 {
+				return &StepOutcome{
+					NeedsApproval:   true,
+					Findings:        strings.Replace(reviewCarryTwoFindings, `"summary":"2 findings"`, `"summary":"2 findings","risk_level":"medium","risk_rationale":"nil deref and cache growth should be addressed"`, 1),
+					ReviewedPaths:   []string{"service.go", "cache.go"},
+					ReviewablePaths: []string{"service.go", "cache.go"},
+				}, nil
+			}
+			if err := os.WriteFile(filepath.Join(workDir, "unrelated.txt"), []byte("tidy\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			execGit(t, workDir, "add", "unrelated.txt")
+			execGit(t, workDir, "commit", "-m", "tidy unrelated code")
+			return &StepOutcome{
+				FixSummary: "tidy unrelated code",
+				Findings:   `{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"the nil deref and cache growth are fixed"}`,
+			}, nil
+		},
+	}
+
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	startExecutor(t, exec, run, repo, workDir)
+
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := respondFixPartial(t, exec, types.StepReview, "review-1"); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steps[0].FindingsJSON == nil {
+		t.Fatal("expected the unverified finding to stay outstanding")
+	}
+	parsed, err := types.ParseFindingsJSON(*steps[0].FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse outstanding findings: %v", err)
+	}
+	if len(parsed.Items) == 0 {
+		t.Fatal("expected carried findings alongside the new assessment")
+	}
+	if parsed.RiskLevel != "low" || parsed.RiskRationale != "the nil deref and cache growth are fixed" {
+		t.Errorf("risk = %q / %q, want the assessment of the round that ran after the fix", parsed.RiskLevel, parsed.RiskRationale)
+	}
+}
