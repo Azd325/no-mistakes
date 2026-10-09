@@ -527,7 +527,7 @@ func TestPRStep_OrdinaryUpdateRendersRequestedIssuesOnce(t *testing.T) {
 func TestExtractClosingKeywordLinesIgnoresCodeExamples(t *testing.T) {
 	t.Parallel()
 	body := "Closes #1\n\n```md\nCloses #2\n```\n\n    Fixes #3\n\n- Resolves owner/repo#4\n"
-	got := extractClosingKeywordLines(body)
+	got := extractClosingKeywordLines(body, githubClosingGrammar)
 	if joined := strings.Join(got, ","); joined != "Closes #1,- Resolves owner/repo#4" {
 		t.Fatalf("extractClosingKeywordLines() = %q", joined)
 	}
@@ -781,7 +781,10 @@ func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 	}
 }
 
-func TestPRStep_ClosesFailsClearlyOutsideGitHub(t *testing.T) {
+// A provider that does not close issues from the pull request body still fails
+// closed: publishing the reference would leave the requested issue open after
+// merge with nothing in the body to notice it.
+func TestPRStep_ClosesRefusedWhenTheProviderCannotCloseIssues(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketPRAPI(t, 0, "")
@@ -793,7 +796,7 @@ func TestPRStep_ClosesFailsClearlyOutsideGitHub(t *testing.T) {
 	}
 
 	_, err := (&PRStep{}).Execute(sctx)
-	if err == nil || !strings.Contains(err.Error(), "--closes currently supports GitHub repositories only") {
+	if err == nil || !strings.Contains(err.Error(), "does not support closing references") {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	if api.createCalls != 0 || api.updateCalls != 0 {
@@ -1210,6 +1213,7 @@ func TestAppendGeneratedSections_StripsAgentGeneratedSections(t *testing.T) {
 		"real risk",
 		"## Testing\n\n- deterministic testing",
 		"## Pipeline\n\n- deterministic pipeline",
+		scm.ProviderGitHub,
 	)
 
 	if strings.Count(got, "## Testing") != 1 {
@@ -1373,6 +1377,7 @@ func TestAppendGeneratedSections_StripsCommonHeadingVariants(t *testing.T) {
 		"real risk",
 		"## Testing\n\n- deterministic testing",
 		"## Pipeline\n\n- deterministic pipeline",
+		scm.ProviderGitHub,
 	)
 
 	if strings.Contains(got, "model-added testing") || strings.Contains(got, "old risk") || strings.Contains(got, "old pipeline") {
@@ -1396,7 +1401,7 @@ func TestAppendGeneratedSections_LeavesUnderLimitBodyByteIdentical(t *testing.T)
 	testingMD := "## Testing\n\n- go test ./internal/pipeline/steps"
 	pipelineMD := pipelineMarkdownForTest("review round 001 stayed small", "review round 002 stayed small")
 
-	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMD)
+	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMD, scm.ProviderGitHub)
 	want := body + "\n\n## Risk Assessment\n\n" + riskLine + "\n\n" + testingMD + "\n\n" + pipelineMD
 
 	if got != want {
@@ -1415,7 +1420,7 @@ func TestAppendGeneratedSections_TruncatesPipelineUpdatesBeforeGitHubLimit(t *te
 	}
 	pipelineMD := pipelineMarkdownForTest(rounds...)
 
-	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMD)
+	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMD, scm.ProviderGitHub)
 
 	assertGitHubBodyLimitForTest(t, got)
 	if !strings.Contains(got, "essential summary survives") || !strings.Contains(got, riskLine) || !strings.Contains(got, testingMD) {
@@ -1447,7 +1452,7 @@ func TestAppendGeneratedSections_TruncatesBitbucketHeadingGroups(t *testing.T) {
 	}
 	pipelineMD := bitbucketPipelineMarkdownForTest(rounds...)
 
-	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMD)
+	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMD, scm.ProviderGitHub)
 
 	assertGitHubBodyLimitForTest(t, got)
 	if strings.Contains(got, "<details>") || strings.Contains(got, pipelineAttestationCommentPrefix) {
@@ -1474,7 +1479,7 @@ func TestAppendGeneratedSections_RetainsPipelineAttestationWhenTruncated(t *test
 	pipelineMD := pipelineMarkdownForTest(strings.Repeat("review round - "+strings.Repeat("x", 1000), 100))
 	pipelineMD = strings.Replace(pipelineMD, noMistakesPRSignature+"\n\n", noMistakesPRSignature+"\n\n"+attestation+"\n\n", 1)
 
-	got := appendGeneratedSections("## What Changed\n\n- summary", "", "", pipelineMD)
+	got := appendGeneratedSections("## What Changed\n\n- summary", "", "", pipelineMD, scm.ProviderGitHub)
 
 	assertGitHubBodyLimitForTest(t, got)
 	if !strings.Contains(got, attestation) {
@@ -1497,6 +1502,7 @@ func TestAppendGeneratedSections_RetainsAttestationWhenEssentialSectionsOverflow
 		strings.Repeat("risk detail ", 5000),
 		"## Testing\n\n"+strings.Repeat("test detail\n", 5000),
 		pipelineMD,
+		scm.ProviderGitHub,
 	)
 
 	assertGitHubBodyLimitForTest(t, got)
@@ -1515,7 +1521,7 @@ func TestAppendGeneratedSections_ExtremePipelineOverflowStillFitsLimit(t *testin
 		rounds = append(rounds, fmt.Sprintf("review round %04d - %s", i, strings.Repeat("x", 2000)))
 	}
 
-	got := appendGeneratedSections(body, "", "", pipelineMarkdownForTest(rounds...))
+	got := appendGeneratedSections(body, "", "", pipelineMarkdownForTest(rounds...), scm.ProviderGitHub)
 
 	assertGitHubBodyLimitForTest(t, got)
 	if !strings.Contains(got, "essential summary survives") {
@@ -1541,6 +1547,7 @@ func TestAppendGeneratedSections_TruncatesOversizedLatestPipelineUpdate(t *testi
 			"review round 002 - older update",
 			latest,
 		),
+		scm.ProviderGitHub,
 	)
 
 	assertGitHubBodyLimitForTest(t, got)
@@ -1568,7 +1575,7 @@ func TestAppendGeneratedSections_TruncatesOversizedLatestPipelineUpdate(t *testi
 		}
 	}
 
-	single := appendGeneratedSections(body, "", "", pipelineMarkdownForTest(latest))
+	single := appendGeneratedSections(body, "", "", pipelineMarkdownForTest(latest), scm.ProviderGitHub)
 	assertGitHubBodyLimitForTest(t, single)
 	if strings.Contains(single, "earlier update") {
 		t.Fatalf("expected single latest update not to be labeled as omitted earlier history, got:\n%s", single)
@@ -1586,7 +1593,7 @@ func TestAppendGeneratedSections_TruncatesSingleLineLatestPipelineUpdate(t *test
 	body := "## What Changed\n\n- essential summary survives"
 	latest := "review round 001 - newest single-line oversized update " + strings.Repeat("x", maxPullRequestBodyBytes)
 
-	got := appendGeneratedSections(body, "", "", pipelineMarkdownForTest(latest))
+	got := appendGeneratedSections(body, "", "", pipelineMarkdownForTest(latest), scm.ProviderGitHub)
 
 	assertGitHubBodyLimitForTest(t, got)
 	if strings.Contains(got, "earlier update") {
@@ -1617,7 +1624,7 @@ func TestAppendGeneratedSections_TrimsBodyToKeepPipelineOmissionMarker(t *testin
 		rounds = append(rounds, fmt.Sprintf("review round %03d - %s", i, strings.Repeat("x", 700)))
 	}
 
-	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMarkdownForTest(rounds...))
+	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMarkdownForTest(rounds...), scm.ProviderGitHub)
 
 	assertGitHubBodyLimitForTest(t, got)
 	for _, want := range []string{
@@ -1661,6 +1668,7 @@ func TestAppendGeneratedSections_TrimsBodyToKeepLatestPipelineUpdate(t *testing.
 			"review round 001 - older update",
 			"review round 002 - newest update "+strings.Repeat("x", 2000),
 		),
+		scm.ProviderGitHub,
 	)
 
 	assertGitHubBodyLimitForTest(t, got)
@@ -1756,7 +1764,7 @@ func TestAppendGeneratedSections_TruncatesUTF8OnValidBoundary(t *testing.T) {
 
 	body := "## What Changed\n\n- essential summary survives\n\n" + strings.Repeat("界", maxPullRequestBodyBytes)
 
-	got = appendGeneratedSections(body, "", "", "")
+	got = appendGeneratedSections(body, "", "", "", scm.ProviderGitHub)
 
 	assertGitHubBodyLimitForTest(t, got)
 	if !utf8.ValidString(got) {
@@ -1764,7 +1772,7 @@ func TestAppendGeneratedSections_TruncatesUTF8OnValidBoundary(t *testing.T) {
 	}
 
 	latest := "review round 001 - newest update " + strings.Repeat("界", maxPullRequestBodyBytes)
-	got = appendGeneratedSections("## What Changed\n\n- essential summary survives", "", "", pipelineMarkdownForTest(latest))
+	got = appendGeneratedSections("## What Changed\n\n- essential summary survives", "", "", pipelineMarkdownForTest(latest), scm.ProviderGitHub)
 
 	assertGitHubBodyLimitForTest(t, got)
 	if !utf8.ValidString(got) {

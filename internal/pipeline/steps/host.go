@@ -43,6 +43,19 @@ func resolvedProvider(sctx *pipeline.StepContext) scm.Provider {
 	return provider
 }
 
+// resolvedProviderForBody is resolvedProvider for the PR-body composition
+// helpers. They are also reachable from embeddings that assemble a body without
+// a repository or run record, where resolvedProvider would dereference a nil
+// field. A body with no repository has no detected provider and keeps GitHub's
+// closing grammar, which is what every body rendered under before GitLab's
+// grammar existed.
+func resolvedProviderForBody(sctx *pipeline.StepContext) scm.Provider {
+	if sctx == nil || sctx.Repo == nil || sctx.Run == nil {
+		return scm.ProviderUnknown
+	}
+	return resolvedProvider(sctx)
+}
+
 // providerPluginForStep returns the configured provider plugin that claims
 // the run's upstream remote, falling back to the recorded PR URL like
 // built-in detection does during recovery.

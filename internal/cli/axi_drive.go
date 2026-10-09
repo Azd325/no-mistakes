@@ -187,14 +187,17 @@ func newAxiRunCmd() *cobra.Command {
 			"draft from the diff and commit messages only. It is persisted on the run;\n" +
 			"the global intent.publish_intent: false default applies to runs started\n" +
 			"without it. The running daemon must honor it; an older daemon is refused.\n\n" +
-			"--closes <issue> adds a GitHub closing reference (Closes #42) to the PR\n" +
-			"body's Issues section. Repeat it for each issue the PR fully resolves; a\n" +
-			"value is an issue number or owner/repo#42. References are deduplicated,\n" +
-			"kept through that run's PR-body refreshes, inherited by rerun, and verified\n" +
-			"on the live PR; a later run started without --closes drops them. Without it\n" +
-			"no closing reference is added or inferred. GitHub closes the issue only when\n" +
-			"the PR merges into the default branch. Reattaching may add references until\n" +
-			"the PR body has been composed. It cannot be combined with --skip pr.\n\n" +
+			"--closes <issue> adds a closing reference (Closes #42) to the PR body's\n" +
+			"Issues section. Repeat it for each issue the PR fully resolves; a value is\n" +
+			"an issue number or a project-qualified reference (owner/repo#42, or\n" +
+			"group/subgroup/repo#42 on GitLab). References are deduplicated, kept through\n" +
+			"that run's PR-body refreshes, inherited by rerun, and verified on the live\n" +
+			"PR; a later run started without --closes drops them. Without it no closing\n" +
+			"reference is added or inferred. The forge closes the issue only when the PR\n" +
+			"merges into the default branch. A provider that does not close issues from\n" +
+			"the PR body fails the step instead of publishing a reference that would\n" +
+			"close nothing. Reattaching may add references until the PR body has been\n" +
+			"composed. It cannot be combined with --skip pr.\n\n" +
 			"--model and/or --effort opt into an immutable Pi profile for a new run.\n" +
 			"An omitted field comes from agent_config.pi; both must resolve. Requires\n" +
 			"Pi-only agents; raw native selection flags conflict. The pin outranks\n" +
@@ -243,7 +246,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
-	cmd.Flags().StringArrayVar(&closesIssues, "closes", nil, "GitHub issue this PR closes when merged; repeat for multiple issues (42 or owner/repo#42)")
+	cmd.Flags().StringArrayVar(&closesIssues, "closes", nil, "issue this PR closes when merged; repeat for multiple issues (42, owner/repo#42, or a nested GitLab project path)")
 	cmd.Flags().String("verification-plan", "", "capture a nonempty UTF-8 verification plan as separate run evidence (new runs only)")
 	bindAxiWaitFlag(cmd, &wait)
 	bindPiProfileFlags(cmd, &model, &effort)
@@ -274,7 +277,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 	// never starts or touches a run.
 	closesIssues, err := closingIssueRefsFromFlags(cmd)
 	if err != nil {
-		return emitError(cmd, 2, err.Error(), "Use a positive issue number or owner/repository-qualified reference, e.g. --closes 42 --closes owner/repo#99.")
+		return emitError(cmd, 2, err.Error(), "Use a positive issue number or project-qualified reference, e.g. --closes 42 --closes owner/repo#99 (group/subgroup/repo#99 on GitLab).")
 	}
 	if len(closesIssues) > 0 && slices.Contains(skipSteps, types.StepPR) {
 		return emitError(cmd, 2, "--closes cannot be combined with --skip pr: skipping the PR step publishes no closing reference", "Drop pr from --skip, or drop --closes.")

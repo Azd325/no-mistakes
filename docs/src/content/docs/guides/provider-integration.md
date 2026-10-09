@@ -34,7 +34,8 @@ What you do not get is PR automation and CI monitoring.
 | **Merge conflict auto-fix** | `gh` CLI | `glab` CLI | `forgejo-axi` | not supported | `az` CLI | not supported | supported when plugin declares `mergeable_state` |
 | **Mergeability polling** | `gh` CLI | `glab` CLI | `forgejo-axi` | not supported | `az` CLI | not supported | supported when plugin declares `mergeable_state` |
 | **Failed check log fetching** | `gh` CLI | `glab` CLI | `forgejo-axi` when runtime routes are available | supported | not yet | supported | supported when plugin declares `failed_check_logs` |
-| **Review-bot findings and comments at the CI gate** | GitHub via `gh` CLI | not supported | not supported | not supported | not supported | not supported | not supported |
+| **Review-bot findings and comments at the CI gate** | GitHub via `gh` CLI (check identity by app slug, comments from review threads) | GitLab via `glab` CLI (comments from unresolved discussion notes, matched by the bot's login; no check identity) | not supported | not supported | not supported | not supported | not supported |
+| **[Explicit issue closure](/no-mistakes/reference/cli/#closing-issues)** (`axi run --closes`) | `gh` CLI | `glab` CLI | not supported | not supported | not supported | not supported | not supported |
 | **[Transient-check rerun](/no-mistakes/reference/repo-config/#cirerun_transient)** (cancellations and pre-run infra failures) | `gh` CLI | not supported | not supported | not supported | not supported | not supported | not supported |
 
 ## What changes when provider wiring is present
@@ -126,6 +127,8 @@ glab auth login
 - CI pipeline status polling until the merge request is merged, closed, or the configured `ci_timeout` idle window elapses
 - Failed job trace fetching (`glab ci trace`) for the CI auto-fix step
 - Merge-conflict polling and auto-fix, same as GitHub
+- A supported review bot's unresolved merge request discussion notes as `ask-user` CI findings under [`ci.review_bot_comments: always`](/no-mistakes/reference/repo-config/#cireview_bot_comments) (see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the identity and filtering rules)
+- Explicit issue closure through `axi run --closes`; the reference is rendered as a `Closes` line in the merge request description and verified on the live merge request. A cross-project reference may nest under subgroups (`group/subgroup/project#95`), and the same nested form is refused on a provider that would read it as a different repository's reference
 
 When no-mistakes updates an existing merge request, it reads the live title and preserves any GitLab draft marker. If `glab mr view` fails or returns an empty title, the update stops instead of risking a change from draft to ready.
 
@@ -319,7 +322,7 @@ PR retargeting are optional capabilities the plugin declares in `status`.
 
 **What you don't get:**
 
-- Fork PR routing, review-bot findings, transient-check reruns, and `--closes`
+- Fork PR routing, review-bot findings, transient-check reruns, and `--closes` (a plugin declares neither the review-comment nor the closing-reference capability)
 
 no-mistakes validates every plugin answer - PR identity, URL shape, check
 buckets, and merged-proof head - and fails closed on anything malformed, on a
