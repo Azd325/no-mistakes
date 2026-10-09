@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -661,13 +662,14 @@ type Commands struct {
 // AutoFixRaw is the YAML representation of auto-fix config.
 // Pointer fields distinguish "not set" (nil) from "set to 0" (disabled).
 type AutoFixRaw struct {
-	Lint     *int `yaml:"lint"`
-	Test     *int `yaml:"test"`
-	Review   *int `yaml:"review"`
-	Document *int `yaml:"document"`
-	CI       *int `yaml:"ci"`
-	Babysit  *int `yaml:"babysit"`
-	Rebase   *int `yaml:"rebase"`
+	Lint     *int          `yaml:"lint"`
+	Test     *int          `yaml:"test"`
+	Review   *int          `yaml:"review"`
+	Document *int          `yaml:"document"`
+	CI       *int          `yaml:"ci"`
+	Babysit  *int          `yaml:"babysit"`
+	Rebase   *int          `yaml:"rebase"`
+	Gates    GateFixLimits `yaml:"gates"`
 }
 
 // CIRaw is the YAML representation of CI-step settings.
@@ -774,6 +776,7 @@ type AutoFix struct {
 	Document int
 	CI       int
 	Rebase   int
+	Gates    GateFixLimits
 }
 
 // Config is the merged result of global + per-repo configuration.
@@ -2424,6 +2427,17 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := dec.Decode(&raw); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	var repoOnly struct {
+		AutoFix struct {
+			Gates yaml.Node `yaml:"gates"`
+		} `yaml:"auto_fix"`
+	}
+	if err := yaml.Unmarshal(data, &repoOnly); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if !repoOnly.AutoFix.Gates.IsZero() {
+		return nil, fmt.Errorf("auto_fix.gates is repository-only; configure it on the trusted default branch")
+	}
 	if err := validateGlobalCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
@@ -2774,6 +2788,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := validateGates(cfg.Gates); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	if err := validateGateFixLimits(cfg.AutoFix.Gates, cfg.Gates); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
 	if err := validateRebaseRaw(cfg.Rebase); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
@@ -2918,7 +2935,8 @@ func validatePathInstructionGlob(pattern string) error {
 // documentation rules that gate itself. Review (the path-scoped guidance
 // injected into the review gate prompt) is trusted-only for the same reason: a
 // pushed branch must not steer the reviewer that gates it. Gates (extra
-// repository-declared shell checks) are trusted-only for the same reason.
+// repository-declared shell checks) and AutoFix.Gates are trusted-only for the
+// same reason.
 // DisableProjectSettings
 // is also trusted-only so a pushed branch cannot enable or defeat the gate-agent
 // project-instruction boundary. NoCI is trusted-only so a pushed branch cannot
@@ -2940,7 +2958,7 @@ func validatePathInstructionGlob(pattern string) error {
 // branch - this blocks the supply-chain vector for repos that ship
 // .no-mistakes.yaml only on feature branches.
 //
-// Non-executing fields (ignore patterns, auto-fix, commit, intent, test,
+// Non-executing fields (ignore patterns, core-step auto-fix, commit, intent, test,
 // PR title format, and providers) are always taken from the pushed copy, matching prior behavior,
 // since they cannot run arbitrary shell, select a process, or spend the
 // maintainer's CI minutes.
@@ -2976,6 +2994,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// branch re-running its own suite, never a branch authoring the extra
 		// check that clears it.
 		effective.Gates = copyGates(trusted.Gates)
+		effective.AutoFix.Gates = maps.Clone(trusted.AutoFix.Gates)
 		// disable_project_settings is a security boundary: honor it ONLY from the
 		// trusted default-branch copy so a pushed branch cannot turn the opt-out
 		// off (and re-enable its own AGENTS.md) or on. A nil trusted copy here
@@ -3050,6 +3069,7 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.ProtectedPaths = nil
 		effective.Review = ReviewRaw{}
 		effective.Gates = nil
+		effective.AutoFix.Gates = nil
 		effective.DisableProjectSettings = false
 		effective.NoCI = false
 		effective.CI = CIRaw{}
@@ -3474,6 +3494,9 @@ func applyAutoFixOverrides(dst *AutoFix, src *AutoFixRaw) {
 // AutoFixLimit returns the max auto-fix attempts for a given step.
 // Steps without auto-fix support return 0.
 func (c *Config) AutoFixLimit(step types.StepName) int {
+	if step.IsCustomGate() {
+		return c.AutoFix.Gates[step.CustomGateLabel()]
+	}
 	switch step {
 	case types.StepLint:
 		return c.AutoFix.Lint
@@ -3518,6 +3541,8 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	af := autoFixDefaults()
 	applyAutoFixOverrides(&af, &global.AutoFix)
 	applyAutoFixOverrides(&af, &repo.AutoFix)
+	// Gate budgets are repository-only, unlike the core step budgets.
+	af.Gates = maps.Clone(repo.AutoFix.Gates)
 
 	ci := ciDefaults()
 	// The operator's global value is a machine-wide floor they can always set;

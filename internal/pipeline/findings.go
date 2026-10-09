@@ -267,6 +267,32 @@ func autoFixableFindingsJSON(raw string) string {
 	return fixableRaw
 }
 
+// gateAutoFixEligible keeps command-gate automation action-driven. An ask-user
+// finding parks the whole gate, and another repair requires fewer findings than
+// the round it answered, including the findings deferred from that repair.
+func gateAutoFixEligible(current, previous, deferred string, fixing bool) bool {
+	findings, err := types.ParseFindingsJSON(current)
+	if err != nil || types.HasAskUserFindings(findings) || len(types.AutoFixableFindings(findings).Items) == 0 {
+		return false
+	}
+	if !fixing {
+		return true
+	}
+	prior, err := types.ParseFindingsJSON(previous)
+	if err != nil {
+		return false
+	}
+	priorCount := len(prior.Items)
+	if deferred != "" {
+		unselected, err := types.ParseFindingsJSON(deferred)
+		if err != nil {
+			return false
+		}
+		priorCount += len(unselected.Items)
+	}
+	return len(findings.Items) < priorCount
+}
+
 func hasAskUserFindingsJSON(raw string) bool {
 	if raw == "" {
 		return false
