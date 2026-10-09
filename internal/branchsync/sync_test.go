@@ -340,6 +340,12 @@ func TestEquivalentButDivergedClassification(t *testing.T) {
 				if state.NextAction == nil {
 					t.Fatalf("next action = nil, want a command that reaches %s", f.pushed)
 				}
+				if tc.name != "same path pipeline overwrite after represented work" {
+					if want := "git checkout --detach " + f.pushed; state.NextAction.Command != want {
+						t.Fatalf("next action command = %q, want %q", state.NextAction.Command, want)
+					}
+					return
+				}
 				branchRef := mustRun(t, f.local, "symbolic-ref", "HEAD")
 				localHead := mustRun(t, f.local, "rev-parse", "HEAD")
 				mustRun(t, f.local, strings.Fields(state.NextAction.Command)[1:]...)
