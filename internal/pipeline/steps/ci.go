@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -208,15 +209,22 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
-	if reviewBotCommentsAlways(sctx) {
-		// Review-bot identity (scm.Check.App) comes from the head commit's
-		// rollup, which is read only when the head is named, exactly as the
-		// polling loop names it. Without it no check is a review bot, so a
-		// green bot's comments would be attributed to no check.
-		pr.HeadSHA = sctx.Run.HeadSHA
-	}
+	// The delivered commit is named on every read, not only when review-bot
+	// identity needs the head's rollup: a host that binds its reads to the
+	// named commit refuses one that is not evidence for it (GitLab's head
+	// pipeline can still point at an older commit), and an operator override
+	// must never be recorded from another commit's checks. Review-bot identity
+	// comes from that same head read, exactly as the polling loop names it.
+	pr.HeadSHA = sctx.Run.HeadSHA
 	checks, err := host.GetChecks(ctx, pr)
 	if err != nil {
+		if errors.Is(err, scm.ErrHeadChanged) {
+			// The provider answered; nothing it offered is evidence for the
+			// commit this run delivered. That is not a broken tool and not a
+			// clean pass: record it as an override naming the mismatch, the
+			// same refusal the polling loop waits on.
+			return fmt.Sprintf("live checks for %s are not for the commit being delivered: %v", prURL, err), nil
+		}
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
 	if allChecksPassed(checks) {
@@ -574,17 +582,32 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return nil, err
 		}
 		if err != nil {
-			clearCIMonitorReady(sctx)
-			lastMonitorLog = ""
-			sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
-			consecutiveCheckErrs++
-			// A provider read that keeps failing (e.g. gh < v2.50 rejecting
-			// `gh pr checks --json`) must become an actionable stop, not an
-			// invisible spin to ci_timeout. The PR state check above returned
-			// already for merged/closed, so reaching here means the PR is open.
-			if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
-				sctx.Log(fmt.Sprintf("CI checks could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
-				return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(err), Findings{}, sctx.DeferredFindings), nil
+			if errors.Is(err, scm.ErrHeadChanged) {
+				// The provider answered, but nothing it offered is evidence for
+				// the commit this run is delivering: no pipeline has registered
+				// for that commit yet, and the pipeline the merge request still
+				// points at belongs to an older one. That state resolves when
+				// the provider creates the pipeline, so it is a wait, not a
+				// read failure - counting it toward the consecutive-error limit
+				// would park the run after a few minutes telling the operator to
+				// check a CLI that answered fine. The idle timeout still bounds
+				// the wait, and the readiness signal is cleared because the
+				// previous observation was for a different head.
+				consecutiveCheckErrs = 0
+				lastMonitorLog = logCIMonitorStatus(sctx, fmt.Sprintf("%s%v", cimonitor.ChecksHeadWaitingPrefix, err), lastMonitorLog)
+			} else {
+				clearCIMonitorReady(sctx)
+				lastMonitorLog = ""
+				sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
+				consecutiveCheckErrs++
+				// A provider read that keeps failing (e.g. gh < v2.50 rejecting
+				// `gh pr checks --json`) must become an actionable stop, not an
+				// invisible spin to ci_timeout. The PR state check above returned
+				// already for merged/closed, so reaching here means the PR is open.
+				if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
+					sctx.Log(fmt.Sprintf("CI checks could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
+					return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(err), Findings{}, sctx.DeferredFindings), nil
+				}
 			}
 		} else {
 			consecutiveCheckErrs = 0
