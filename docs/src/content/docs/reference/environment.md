@@ -93,6 +93,14 @@ Path to a replacement CA trust bundle used by forgejo-axi for HTTPS requests.
 
 This replaces rather than appends to the platform trust store. See [Provider Integration](/no-mistakes/guides/provider-integration/#forgejo) for provider setup.
 
+## `NO_MISTAKES_FINDINGS_FILE`
+
+Absolute path to the empty JSON report file supplied to each repository [gate command](/no-mistakes/reference/repo-config/#structured-findings).
+
+This is a command-child variable, not a daemon setting. no-mistakes creates a fresh file outside the worktree before every gate command and removes it after reading the result. Commands can write `{"findings":[...]}` using the existing finding shape to report stable finding IDs and locations. Commands that leave it empty retain their exit-code-only behavior.
+
+See the [gate contract](/no-mistakes/reference/repo-config/#structured-findings) for the report schema, limits, verdicts, and approval behavior.
+
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
 Bitbucket Cloud account email used for PR creation and CI monitoring.

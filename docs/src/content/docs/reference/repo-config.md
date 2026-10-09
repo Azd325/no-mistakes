@@ -523,7 +523,40 @@ gates:
     command: "make mutation"
 ```
 
-A gate runs its command in the run worktree through the platform shell, `sh -c` on POSIX or `cmd.exe /c` on Windows, and passes on exit code 0. Gate commands report through their exit code and combined output; there is no structured findings-file protocol. Agent gates are not supported. An entry with `instructions` fails config parsing so it cannot be mistaken for a command gate.
+A gate runs its command in the run worktree through the platform shell, `sh -c` on POSIX or `cmd.exe /c` on Windows. A command that ignores `NO_MISTAKES_FINDINGS_FILE` passes on exit code 0 and reports one error finding on a non-zero exit, as before. Agent gates are not supported. An entry with `instructions` fails config parsing so it cannot be mistaken for a command gate.
+
+#### Structured findings
+
+Before each command execution, including a re-check after a fix, no-mistakes creates an empty file in a private temporary directory outside the worktree and supplies its absolute path as `NO_MISTAKES_FINDINGS_FILE`. The command may write this JSON to that file:
+
+```json
+{
+  "findings": [
+    {
+      "id": "mutation-budget-low",
+      "severity": "error",
+      "file": "src/parser.go",
+      "line": 42,
+      "description": "Mutation score is below the configured budget",
+      "action": "ask-user"
+    }
+  ]
+}
+```
+
+This uses the existing pipeline finding shape. Each finding needs a non-empty `id`, unique within the file and stable across executions, a `severity` of `error`, `warning`, or `info`, and a non-empty `description`. IDs cannot contain commas or reuse IDs reserved by the pipeline. `file` and `line` are optional; a supplied line cannot be negative. `action` is optional and defaults to `ask-user`; accepted values are `auto-fix`, `ask-user`, and `no-op`. Enum values use these exact spellings. The report and each finding reject fields outside this schema.
+
+| Command exit | File | Gate verdict |
+|---|---|---|
+| 0 | Empty | Pass, unchanged |
+| Non-zero | Empty | Park with the existing exit-code error finding and command output |
+| 0 | Valid report | Any `error` parks the gate; warnings and info attach without failing the command verdict |
+| Non-zero | Valid report | Park with the reported findings and command output |
+| Any | Invalid or over-cap report | Park with one `error` finding explaining the problem, action `ask-user` |
+
+A report is limited to 1 MiB and 500 findings. The final encoded findings payload, including the command and log summary, must fit the portion of half the existing 1 MiB IPC frame left after the run's persisted findings and the refusal space reserved for every configured gate. The other half remains available for the envelope and other run state. JSON escaping can make the effective file cap lower than 1 MiB. A payload that cannot fit parks with one `error` finding naming its encoded size and the remaining transport budget, action `ask-user`; findings are never truncated to make a report fit. This fixed-size transport refusal omits the command summary, whose complete output remains in the gate's step log. Malformed JSON, a missing `findings` array, missing required fields, duplicate or unusable IDs, invalid severities or actions, unknown fields, and an unreadable or non-regular file also fail closed. An empty array is a valid report; an empty file opts out. The temporary directory is removed after the command is checked.
+
+Findings remain available in `axi status`, `axi logs`, and the TUI, and their IDs can be selected with `axi respond --action fix --findings <ids>`. Executor approval policy is unchanged: a zero-exit report containing only warnings or info still goes through the same approval rules as other steps. Warnings park, and an omitted action defaults to `ask-user`. A gate never starts an automatic repair, even when a reported finding says `auto-fix`.
 
 #### Placement
 
@@ -539,7 +572,7 @@ A run resolves this list once when it starts. Adding or removing a gate on the d
 
 A failing gate parks by default. Trusted [`auto_fix.gates.<name>`](#auto_fix) can authorize bounded repairs of auto-fix-eligible findings. Any `ask-user` finding still parks the whole gate. The current exit-code-only failure is `ask-user`, so the budget has no effect until the [structured findings follow-up](https://github.com/kunchenguid/no-mistakes/issues/1027) supplies auto-fix-eligible findings.
 
-Answering that decision with `fix` is that authorization: the gate then runs a fix turn against the reported findings and the command that must exit `0`, then re-runs its check. The next verdict describes the repaired worktree. Answering `approve` accepts the change as it stands.
+Answering that decision with `fix` is that authorization: the gate then runs a fix turn against the reported findings and the command that must exit `0` without reporting error findings, then re-runs its check. The next verdict describes the repaired worktree. Answering `approve` accepts the change as it stands.
 
 Each gate keeps its own step log under the step name `gate.<anchor>.<name>`, so a gate declared as `name: mutation-budget` with `after: test` is read with `no-mistakes axi logs --step gate.test.mutation-budget`.
 
