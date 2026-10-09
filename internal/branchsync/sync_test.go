@@ -336,6 +336,11 @@ func TestEquivalentButDivergedClassification(t *testing.T) {
 			if state.State != tc.wantState || state.Relation != RelationDiverged || state.Safety != tc.wantSafe || state.Changed {
 				t.Fatalf("state = %#v", state)
 			}
+			if tc.wantSafe == "blocked_diverged" {
+				if state.NextAction == nil || state.NextAction.Command != "git checkout --detach "+f.pushed {
+					t.Fatalf("next action = %#v, want a detached checkout of %s", state.NextAction, f.pushed)
+				}
+			}
 		})
 	}
 }
