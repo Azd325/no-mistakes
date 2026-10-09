@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -870,6 +871,9 @@ func TestPushStep_DoesNotMintAttestation(t *testing.T) {
 	setupGateMirror(t, sctx)
 	recordReviewApproval(t, sctx, newHead)
 
+	var logs []string
+	sctx.Log = func(line string) { logs = append(logs, line) }
+
 	bodyFile := filepath.Join(t.TempDir(), "pr-body.md")
 	if err := os.WriteFile(bodyFile, []byte(foreign), 0o644); err != nil {
 		t.Fatal(err)
@@ -897,8 +901,58 @@ func TestPushStep_DoesNotMintAttestation(t *testing.T) {
 	if string(body) != foreign {
 		t.Fatal("body without an attestation must be left untouched")
 	}
+	if want := "skipping attestation rebind: pull request body carries no attestation marker"; !slices.Contains(logs, want) {
+		t.Fatalf("log = %q, want %q", logs, want)
+	}
 	if got, out := runVerifyPy(t, foreign, newHead); got != "failure" {
 		t.Fatalf("a PR not raised through no-mistakes must still fail, got %s\n%s", got, out)
+	}
+}
+
+// TestPushStep_NoPullRequestLogsTheSkippedAttestation pins the log line for
+// the skip where the PR lookup finds nothing and the run holds no PR URL: the
+// push still happens and no PR is written.
+func TestPushStep_NoPullRequestLogsTheSkippedAttestation(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, _ := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	if err := os.WriteFile(filepath.Join(dir, "new-work.txt"), []byte("new work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "new work")
+	newHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, newHead, config.Commands{})
+	sctx.Repo.UpstreamURL = "https://github.com/test/repo"
+	sctx.Run.Branch = "refs/heads/feature"
+	setupGateMirror(t, sctx)
+	recordReviewApproval(t, sctx, newHead)
+
+	var logs []string
+	sctx.Log = func(line string) { logs = append(logs, line) }
+	logFile := filepath.Join(t.TempDir(), "gh.log")
+	sctx.Env = append(fakeCIGH(t, "OPEN", `[]`),
+		"FAKE_CLI_PR_LIST_JSON=[]",
+		"FAKE_CLI_LOG="+logFile,
+	)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatalf("push step failed: %v", err)
+	}
+	if remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remoteHead != newHead {
+		t.Fatalf("remote head = %s, want %s", remoteHead, newHead)
+	}
+	if logData, err := os.ReadFile(logFile); err == nil && strings.Contains(string(logData), "pr edit") {
+		t.Fatalf("must not write a PR body when no PR exists:\n%s", logData)
+	}
+	if want := "skipping attestation write: no pull request found for this branch"; !slices.Contains(logs, want) {
+		t.Fatalf("log = %q, want %q", logs, want)
 	}
 }
 

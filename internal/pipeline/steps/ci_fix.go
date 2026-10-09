@@ -858,6 +858,9 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 		return fmt.Errorf("%w: resolve pull request: %w", errAttestationWriteFailed, err)
 	}
 	if pr == nil {
+		if sctx.Log != nil {
+			sctx.Log("skipping attestation write: no pull request found for this branch")
+		}
 		return nil
 	}
 	if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, steps, sctx.Log, attestationPolicyFrom(sctx)); err != nil {
@@ -914,7 +917,13 @@ func restampPRAttestationWithSteps(ctx context.Context, host scm.Host, pr *scm.P
 					return err
 				}
 			}
-			if !rebound || updated == content.Body {
+			if !rebound {
+				if logfn != nil {
+					logfn("skipping attestation rebind: pull request body carries no attestation marker")
+				}
+				return nil
+			}
+			if updated == content.Body {
 				return nil
 			}
 
