@@ -321,6 +321,7 @@ Rules:
 	}
 
 	findings.Items = append(findings.Items, verdictFindings(findings)...)
+	findings.Items = append(findings.Items, unselectedTestFindings(sctx, findings.Items)...)
 
 	needsApproval := hasBlockingFindings(findings.Items)
 	autoFixable := needsApproval
@@ -493,18 +494,21 @@ func verdictFindings(findings Findings) []Finding {
 	switch findings.Verdict {
 	case types.TestVerdictNoGo:
 		return []Finding{{
+			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityError,
 			Action:      types.ActionAutoFix,
 			Description: fmt.Sprintf("live validation verdict: no-go (%s)%s", coverage, failedScenarioSuffix(findings.Scenarios)),
 		}}
 	case types.TestVerdictInconclusive:
 		return []Finding{{
+			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityWarning,
 			Action:      types.ActionAskUser,
 			Description: fmt.Sprintf("live validation verdict: inconclusive (%s)%s", coverage, untestedScenarioSuffix(findings.Scenarios)),
 		}}
 	case types.TestVerdictNoSurface:
 		return []Finding{{
+			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityWarning,
 			Action:      types.ActionAskUser,
 			Description: fmt.Sprintf("this change has no live-validatable surface; proceed without live validation? (%s)%s", coverage, untestedScenarioReasonSuffix(findings.Scenarios)),
@@ -693,6 +697,44 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 			item.ID = ""
 			carried.Items = append(carried.Items, item)
 		}
+	}
+	return carried
+}
+
+// unselectedTestFindings returns the ask-user or blocking findings an earlier
+// round deferred when the automatic fix loop started this round. They can
+// record what an earlier turn observed - a write outside the workspace, say -
+// rather than a property of the code, so this round's clean result cannot
+// clear them; only a human response can. Step-owned findings are skipped
+// because this execution derives them again. A re-report replaces a deferred
+// finding only when SameFinding and the effective action both match: matching
+// content alone could erase an undecided ask-user finding after an action change.
+func unselectedTestFindings(sctx *pipeline.StepContext, current []Finding) []Finding {
+	if !sctx.AutoFixRound {
+		return nil
+	}
+	// Fails only when nothing was deferred: the executor builds this from the
+	// findings JSON it just parsed to select the round.
+	deferred, err := types.ParseFindingsJSON(sctx.DeferredFindings)
+	if err != nil {
+		return nil
+	}
+	var carried []Finding
+	for _, item := range deferred.Items {
+		if slices.Contains(testBudgetCutIDs, item.ID) || item.Category == types.FindingCategoryTestCommand || item.Category == types.FindingCategoryTestVerdict {
+			continue
+		}
+		if item.ActionOrDefault() != types.ActionAskUser && item.Severity != types.FindingSeverityError && item.Severity != types.FindingSeverityWarning {
+			continue
+		}
+		if slices.ContainsFunc(current, func(reported Finding) bool {
+			return pipeline.SameFinding(reported, item) && reported.ActionOrDefault() == item.ActionOrDefault()
+		}) {
+			continue
+		}
+		// Cleared so it is renumbered: this round's own findings may reuse the ID.
+		item.ID = ""
+		carried = append(carried, item)
 	}
 	return carried
 }
