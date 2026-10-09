@@ -148,6 +148,11 @@ func mergeFindingsJSON(existingRaw, additionalRaw string) string {
 	existingCounts := countFindingFingerprints(existing.Items)
 	additionalCounts := countFindingFingerprints(additional.Items)
 	merged := types.FindingsMetadata(existing)
+	if additional.RiskLevel != "" {
+		merged.RiskLevel = additional.RiskLevel
+		merged.RiskRationale = additional.RiskRationale
+		merged.RiskScope = additional.RiskScope
+	}
 	for _, item := range existing.Items {
 		merged.Items = append(merged.Items, item)
 		seen[findingKey(item)] = true
