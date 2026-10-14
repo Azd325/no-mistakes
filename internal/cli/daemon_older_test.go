@@ -92,6 +92,7 @@ func TestGateControlOlderDaemonFallback(t *testing.T) {
 	}{
 		{name: "update", pid: os.Getpid(), args: []string{"update"}},
 		{name: "daemon ancestry", pid: os.Getppid(), args: []string{"daemon", "restart"}, want: "nested_gate_context"},
+		{name: "uninstall", pid: os.Getpid(), args: []string{"daemon", "uninstall"}},
 		{name: "missing PID", args: []string{"daemon", "stop"}, want: "read daemon PID"},
 		{name: "other mutations", pid: os.Getpid(), args: []string{"axi", "run"}, want: "method not found"},
 		{name: "answer refuses", args: []string{"daemon", "start"}, want: "nested_gate_context", configure: func(s *ipc.Server) {

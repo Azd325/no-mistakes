@@ -27,7 +27,8 @@ func guardGateControl(cmd *cobra.Command) error {
 	}
 	path := cmd.CommandPath()
 	allowOlder := path == "no-mistakes daemon start" || path == "no-mistakes daemon stop" ||
-		path == "no-mistakes daemon restart" || path == "no-mistakes update"
+		path == "no-mistakes daemon restart" || path == "no-mistakes daemon uninstall" ||
+		path == "no-mistakes update"
 	result, older, err := classifyGateControlCaller(cmd.Context(), allowOlder)
 	if err != nil {
 		return err
