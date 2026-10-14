@@ -14,13 +14,6 @@ import (
 // returning a short human-readable label for telemetry.
 type retryClassifier func(error) (label string, retry bool)
 
-// minUsefulRetryBudget is the least time a retry needs before the step's
-// absolute deadline to be worth starting. It matches the step quiet-warning
-// threshold (config.DefaultStepQuietWarning): a cold attempt that stays silent
-// that long is already flagged as stalled, so less time than that cannot yield
-// a result and would only be killed mid-run by the deadline.
-const minUsefulRetryBudget = 10 * time.Minute
-
 // transientBackoff is the package-level sleep function used between retries.
 // It is overridden in tests to keep them fast while preserving cancellation
 // semantics.
@@ -74,12 +67,13 @@ func runWithRetry(
 	var lastErr error
 	var lastLabel string
 	var lastResult *Result
+	var lastDuration time.Duration
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			if deadline, ok := ctx.Deadline(); ok {
-				if left := time.Until(deadline); left < minUsefulRetryBudget {
-					return lastResult, fmt.Errorf("%s retry skipped: %s of the step budget remains, below the %s needed for a useful attempt: %w",
-						name, left.Round(time.Second), minUsefulRetryBudget, lastErr)
+				if left := time.Until(deadline); left < lastDuration {
+					return lastResult, fmt.Errorf("%s retry skipped: %s of the step budget remains, less than the %s the failed attempt took: %w",
+						name, left.Round(time.Millisecond), lastDuration.Round(time.Millisecond), lastErr)
 				}
 			}
 			emitAgentRetry(opts, name, lastLabel, attempt+1, maxRetries+1)
@@ -89,7 +83,9 @@ func runWithRetry(
 		}
 		startedAt := time.Now()
 		result, err := runOnce()
-		emitAgentAttempt(opts, name, result, err, startedAt, time.Now())
+		completedAt := time.Now()
+		lastDuration = completedAt.Sub(startedAt)
+		emitAgentAttempt(opts, name, result, err, startedAt, completedAt)
 		if err == nil {
 			return result, nil
 		}

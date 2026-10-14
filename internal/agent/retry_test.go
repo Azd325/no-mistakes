@@ -479,19 +479,22 @@ func TestTransientBackoffDuration_Progression(t *testing.T) {
 	}
 }
 
-func TestRunWithRetry_SkipsRetryWhenDeadlineBudgetIsExhausted(t *testing.T) {
+func TestRunWithRetry_SkipsRetryWhenFirstAttemptConsumedTheBudget(t *testing.T) {
 	defer withFastBackoff(t)()
 
-	ctx, cancel := context.WithTimeout(context.Background(), minUsefulRetryBudget/2)
+	const deadline = 500 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	transientErr := fmt.Errorf("API Error: overloaded_error: please retry")
 	calls := 0
+	start := time.Now()
 	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
 		calls++
+		time.Sleep(400 * time.Millisecond)
 		return nil, transientErr
 	})
 	if calls != 1 {
-		t.Fatalf("calls = %d, want 1: no retry may start without a useful budget", calls)
+		t.Fatalf("calls = %d, want 1: a retry may not start with less budget than the failed attempt took", calls)
 	}
 	if !errors.Is(err, transientErr) {
 		t.Fatalf("err = %v, want it to wrap the original error", err)
@@ -499,12 +502,15 @@ func TestRunWithRetry_SkipsRetryWhenDeadlineBudgetIsExhausted(t *testing.T) {
 	if !strings.Contains(err.Error(), "retry skipped") || !strings.Contains(err.Error(), "step budget") {
 		t.Fatalf("err = %q, want a skipped-for-budget message", err)
 	}
+	if elapsed := time.Since(start); elapsed > deadline {
+		t.Fatalf("elapsed = %s, want within the %s deadline", elapsed, deadline)
+	}
 }
 
-func TestRunWithRetry_RetriesWhenDeadlineBudgetIsSufficient(t *testing.T) {
+func TestRunWithRetry_RetriesFastFailureUnderShortDeadline(t *testing.T) {
 	defer withFastBackoff(t)()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*minUsefulRetryBudget)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	calls := 0
 	res, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
