@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"regexp"
 	"strings"
@@ -12,6 +13,13 @@ import (
 // retryClassifier inspects an error and reports whether it should be retried,
 // returning a short human-readable label for telemetry.
 type retryClassifier func(error) (label string, retry bool)
+
+// minUsefulRetryBudget is the least time a retry needs before the step's
+// absolute deadline to be worth starting. It matches the step quiet-warning
+// threshold (config.DefaultStepQuietWarning): a cold attempt that stays silent
+// that long is already flagged as stalled, so less time than that cannot yield
+// a result and would only be killed mid-run by the deadline.
+const minUsefulRetryBudget = 10 * time.Minute
 
 // transientBackoff is the package-level sleep function used between retries.
 // It is overridden in tests to keep them fast while preserving cancellation
@@ -68,6 +76,12 @@ func runWithRetry(
 	var lastResult *Result
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
+			if deadline, ok := ctx.Deadline(); ok {
+				if left := time.Until(deadline); left < minUsefulRetryBudget {
+					return lastResult, fmt.Errorf("%s retry skipped: %s of the step budget remains, below the %s needed for a useful attempt: %w",
+						name, left.Round(time.Second), minUsefulRetryBudget, lastErr)
+				}
+			}
 			emitAgentRetry(opts, name, lastLabel, attempt+1, maxRetries+1)
 			if err := transientBackoff(ctx, attempt); err != nil {
 				return lastResult, err
