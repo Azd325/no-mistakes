@@ -82,6 +82,23 @@ func TestOlderDaemonLifecycleKeepsActiveRunGuard(t *testing.T) {
 	}
 }
 
+func TestOlderDaemonStartForceReplacesDespiteActiveRuns(t *testing.T) {
+	p := legacyLifecycleServer(t, os.Getpid(), nil)
+	createLifecycleGuardRuns(t, p)
+	var calls []string
+	oldStop, oldStart := daemonStopFn, daemonStartFn
+	daemonStopFn = func(*paths.Paths) error { calls = append(calls, "stop"); return nil }
+	daemonStartFn = func(*paths.Paths) error { calls = append(calls, "start"); return nil }
+	t.Cleanup(func() { daemonStopFn, daemonStartFn = oldStop, oldStart })
+	out, err := executeCmd("daemon", "start", "--force")
+	if err != nil {
+		t.Fatalf("forced start failed: %v\n%s", err, out)
+	}
+	if want := []string{"stop", "start"}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
 func TestGateControlOlderDaemonFallback(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
