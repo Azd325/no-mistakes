@@ -550,13 +550,23 @@ func newDaemonStartCmd() *cobra.Command {
 				if err := p.EnsureDirs(); err != nil {
 					return err
 				}
-				// Only a running daemon whose service definition drifted is
-				// restarted, so only that path needs the active-run guard.
+				// Restarting for service drift or an older daemon must pass
+				// the active-run guard before stopping or rewriting anything.
 				guard := func() error {
 					logLifecycleInvocation("daemon.start", force)
 					return guardDestructiveDaemonLifecycle(p, cmd.ErrOrStderr(), "daemon start", force)
 				}
-				if err := daemonStartGuardedFn(p, guard); err != nil {
+				if older, _ := cmd.Context().Value(olderDaemonContextKey{}).(bool); older {
+					if err := guard(); err != nil {
+						return err
+					}
+					if err := daemonStopFn(p); err != nil {
+						return fmt.Errorf("stop older daemon: %w", err)
+					}
+					if err := daemonStartFn(p); err != nil {
+						return fmt.Errorf("start daemon: %w", err)
+					}
+				} else if err := daemonStartGuardedFn(p, guard); err != nil {
 					return err
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "  %s daemon started\n", sGreen.Render("✓"))
