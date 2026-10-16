@@ -1,10 +1,11 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -79,8 +80,10 @@ func refuseRetry(runID, proof, format string, args ...any) error {
 // the run is this branch's latest and failed while nothing is active; its
 // record names exactly one failed step, failed on an agent invocation error,
 // with nothing from Test on carried and nothing published; its preserved head
-// is anchored; the caller is clean at exactly that head; and the model profile
-// and the repository's gates are unchanged.
+// is anchored; the caller is clean at exactly that head; the model profile and
+// the repository's gates are unchanged; and the repository configuration, the
+// recorded global configuration, and the agent and model that served each
+// carried step are the ones a new run would use.
 func (m *RunManager) HandleRetry(ctx context.Context, repoID, branch, runID, callerHeadSHA string) (*db.RunRetry, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
@@ -259,16 +262,21 @@ func (m *RunManager) proveRetryConfiguration(ctx context.Context, repo *db.Repo,
 		return fmt.Errorf("the repository's gates changed since the run started, so its step sequence would differ")
 	}
 	carried := checkpoint.Steps[:checkpoint.Index]
-	if err := m.proveCarriedRepoConfig(ctx, repo, source, currentRepoCfg, carried); err != nil {
+	if err := m.proveCarriedReviewConfig(ctx, repo, source, globalCfg, currentRepoCfg, carried); err != nil {
 		return err
 	}
-	return m.proveCarriedAgent(source, cfg, carried)
+	return m.proveCarriedAgent(ctx, source, cfg, carried)
 }
 
-// proveCarriedRepoConfig compares the repository configuration a carried
-// Review round ran under, rebuilt from the trusted default-branch commit that
-// round recorded, with the configuration a new run would get now.
-func (m *RunManager) proveCarriedRepoConfig(ctx context.Context, repo *db.Repo, source *db.Run, current *config.RepoConfig, carried []*db.StepResult) error {
+// proveCarriedReviewConfig compares the configuration a carried Review ran
+// under with the configuration a new run would get now: the repository
+// configuration rebuilt from the trusted default-branch commit its rounds
+// recorded, and the global configuration they recorded when it was captured.
+func (m *RunManager) proveCarriedReviewConfig(ctx context.Context, repo *db.Repo, source *db.Run, globalCfg *config.GlobalConfig, current *config.RepoConfig, carried []*db.StepResult) error {
+	currentYAML, err := yaml.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("serialize the repository configuration: %w", err)
+	}
 	for _, row := range carried {
 		if row.StepName != types.StepReview || row.Status != types.StepStatusCompleted {
 			continue
@@ -278,9 +286,13 @@ func (m *RunManager) proveCarriedRepoConfig(ctx context.Context, repo *db.Repo, 
 			return fmt.Errorf("read the carried review rounds: %w", err)
 		}
 		recordedSHA := ""
+		var recordedGlobal []byte
 		for _, round := range rounds {
 			if round.TrustedConfigSHA != nil {
 				recordedSHA = *round.TrustedConfigSHA
+			}
+			if len(round.GlobalConfigYAML) > 0 {
+				recordedGlobal = round.GlobalConfigYAML
 			}
 		}
 		if recordedSHA == "" {
@@ -294,38 +306,91 @@ func (m *RunManager) proveCarriedRepoConfig(ctx context.Context, repo *db.Repo, 
 		if err != nil {
 			return fmt.Errorf("serialize the carried review's repository configuration: %w", err)
 		}
-		currentYAML, err := yaml.Marshal(current)
+		changed, err := changedSettings(recordedYAML, currentYAML)
 		if err != nil {
-			return fmt.Errorf("serialize the repository configuration: %w", err)
+			return err
 		}
-		if !bytes.Equal(recordedYAML, currentYAML) {
-			return fmt.Errorf("the repository configuration changed since the carried review ran under trusted commit %s, so its approval does not carry; rerun the pipeline instead", recordedSHA)
+		if len(changed) > 0 {
+			return fmt.Errorf("the repository configuration changed since the carried review ran under trusted commit %s (%s), so its approval does not carry; rerun the pipeline instead", recordedSHA, strings.Join(changed, ", "))
+		}
+		if recordedGlobal == nil {
+			continue
+		}
+		changed, err = changedSettings(recordedGlobal, globalCfg.SourceYAML)
+		if err != nil {
+			return err
+		}
+		if len(changed) > 0 {
+			return fmt.Errorf("the global configuration changed since the carried review ran (%s), so its approval does not carry; rerun the pipeline instead", strings.Join(changed, ", "))
 		}
 	}
 	return nil
 }
 
-// proveCarriedAgent requires every agent that served a carried step to still be
-// selected. A run pinned to a Pi profile is proven by the profile instead.
-func (m *RunManager) proveCarriedAgent(source *db.Run, cfg *config.Config, carried []*db.StepResult) error {
-	if source.PiProfile != nil || cfg.Agent == types.AgentAuto || slices.Contains(cfg.Agents, types.AgentAuto) {
+// changedSettings names the top-level settings whose values differ between two
+// YAML documents.
+func changedSettings(recorded, current []byte) ([]string, error) {
+	var before, after map[string]any
+	if err := yaml.Unmarshal(recorded, &before); err != nil {
+		return nil, fmt.Errorf("read a recorded configuration: %w", err)
+	}
+	if err := yaml.Unmarshal(current, &after); err != nil {
+		return nil, fmt.Errorf("read the current configuration: %w", err)
+	}
+	var changed []string
+	for key, value := range before {
+		if next, ok := after[key]; !ok || !reflect.DeepEqual(value, next) {
+			changed = append(changed, key)
+		}
+	}
+	for key := range after {
+		if _, ok := before[key]; !ok {
+			changed = append(changed, key)
+		}
+	}
+	slices.Sort(changed)
+	return changed, nil
+}
+
+// proveCarriedAgent requires the agent and model that served every carried
+// step to still be the ones a new run selects. Each carried row's invocations
+// live in the run that first executed it. A run pinned to a Pi profile is
+// proven by the profile instead.
+func (m *RunManager) proveCarriedAgent(ctx context.Context, source *db.Run, cfg *config.Config, carried []*db.StepResult) error {
+	if source.PiProfile != nil {
 		return nil
 	}
-	carriedSteps := make(map[string]bool, len(carried))
+	byRun := map[string][]db.AgentInvocation{}
+	resolved := false
 	for _, row := range carried {
-		carriedSteps[string(row.StepName)] = true
-	}
-	invocations, err := m.db.GetAgentInvocationsByRun(source.ID)
-	if err != nil {
-		return fmt.Errorf("read the run's agent invocations: %w", err)
-	}
-	for _, inv := range invocations {
-		if !carriedSteps[inv.StepName] || inv.ExitStatus != "ok" {
-			continue
+		origin, err := m.db.GetStepResult(row.RoundsStepID())
+		if err != nil || origin == nil {
+			return fmt.Errorf("read the origin of carried step %s: %v", row.StepName, err)
 		}
-		name := types.AgentName(inv.Agent)
-		if name != cfg.Agent && !slices.Contains(cfg.Agents, name) {
-			return fmt.Errorf("carried step %s ran on agent %s, which is no longer selected (agent is now %s); rerun the pipeline instead", inv.StepName, inv.Agent, cfg.Agent)
+		invocations, ok := byRun[origin.RunID]
+		if !ok {
+			if invocations, err = m.db.GetAgentInvocationsByRun(origin.RunID); err != nil {
+				return fmt.Errorf("read the agent invocations of run %s: %w", origin.RunID, err)
+			}
+			byRun[origin.RunID] = invocations
+		}
+		for _, inv := range invocations {
+			if inv.StepName != string(row.StepName) || inv.ExitStatus != "ok" {
+				continue
+			}
+			if !resolved {
+				if err := cfg.ResolveAgent(ctx, exec.LookPath); err != nil {
+					return fmt.Errorf("resolve the agent a new run would use: %w", err)
+				}
+				resolved = true
+			}
+			name := types.AgentName(inv.Agent)
+			if name != cfg.Agent && !slices.Contains(cfg.Agents, name) {
+				return fmt.Errorf("carried step %s ran on agent %s, which is no longer selected (agent is now %s); rerun the pipeline instead", inv.StepName, inv.Agent, cfg.Agent)
+			}
+			if model := cfg.AgentProfileFor(name).Model; model != "" && inv.Model != "" && !strings.Contains(inv.Model, model) {
+				return fmt.Errorf("carried step %s ran %s on model %s, but agent_config.%s.model is now %s; rerun the pipeline instead", inv.StepName, inv.Agent, inv.Model, inv.Agent, model)
+			}
 		}
 	}
 	return nil

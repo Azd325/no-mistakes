@@ -197,6 +197,8 @@ type retryFixtureOptions struct {
 	profile      *agentcfg.PiProfile
 	plan         *verificationplan.Snapshot
 	failInTest   bool
+	twoHop       bool
+	globalYAML   string
 }
 
 func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
@@ -230,10 +232,10 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 			err = d.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, "")
 		case name == types.StepReview && opts.failInTest:
 			if err = d.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, ""); err == nil {
-				_, err = d.InsertReviewStepRoundWithProvenance(sr.ID, 1, "initial", nil, nil, submitted, "", submitted, nil, nil, 1)
+				_, err = d.InsertReviewStepRoundWithProvenance(sr.ID, 1, "initial", nil, nil, submitted, "", submitted, []byte(opts.globalYAML), nil, 1)
 			}
 			if err == nil {
-				_, err = d.InsertAgentInvocation(db.AgentInvocation{RunID: source.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "claude", SessionMode: "fresh", StartedAt: 1, CompletedAt: 2, ExitStatus: "ok"})
+				_, err = d.InsertAgentInvocation(db.AgentInvocation{RunID: source.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "claude", Model: "claude-opus-1", SessionMode: "fresh", StartedAt: 1, CompletedAt: 2, ExitStatus: "ok"})
 			}
 		case name == types.StepReview:
 			err = d.FailStepWithCause(sr.ID, "review agent: "+outage, 1, db.StepFailureCauseAgentInvocation)
@@ -247,11 +249,64 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 	if err := d.UpdateRunErrorStatusWithVerifiedHead(source.ID, "step review failed", types.RunFailed, submitted); err != nil {
 		t.Fatal(err)
 	}
+	if opts.twoHop {
+		source = f.continuationOf(t, source)
+	}
 	f.source, err = d.GetRun(source.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return f
+}
+
+// continuationOf records a retry of source that carries its Review and failed
+// in Test too, so its Review row holds no invocations of its own.
+func (f *retryFixture) continuationOf(t *testing.T, source *db.Run) *db.Run {
+	t.Helper()
+	sourceRows, err := f.d.GetStepsByRun(source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := f.d.InsertRunWithIntentAndLaunchNonce(f.repo.ID, "main", f.submitted, f.submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, "", "", "", "", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range sourceRows {
+		if row.StepName == types.StepTest {
+			sr, err := f.d.InsertStepResult(next.ID, row.StepName)
+			if err == nil {
+				err = f.d.FailStepWithCause(sr.ID, "test agent: usage limit", 1, db.StepFailureCauseAgentInvocation)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if _, err := f.d.InsertCarriedStepResult(next.ID, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.d.UpdateRunErrorStatusWithVerifiedHead(next.ID, "step test failed", types.RunFailed, f.submitted); err != nil {
+		t.Fatal(err)
+	}
+	return next
+}
+
+// writeFakeAgents points the named agents at executable stand-ins so a retry
+// can resolve them, and writes extra global configuration after them.
+func writeFakeAgents(t *testing.T, p *paths.Paths, selected string, extra string, names ...string) {
+	t.Helper()
+	config := "agent: " + selected + "\nagent_path_override:\n"
+	for _, name := range names {
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		config += "  " + name + ": " + path + "\n"
+	}
+	if err := os.WriteFile(p.ConfigFile(), []byte(config+extra), 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type countingStep struct {
@@ -447,12 +502,16 @@ func TestRetryRefusesUnlessEveryProofHolds(t *testing.T) {
 }
 
 func TestRetryRefusesACarriedReviewFromAnotherConfiguration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
 	for _, tc := range []struct {
 		name   string
+		opts   retryFixtureOptions
 		change func(t *testing.T, f *retryFixture)
-		reason string
+		reason []string
 	}{
-		{name: "trusted review settings changed", reason: "repository configuration changed", change: func(t *testing.T, f *retryFixture) {
+		{name: "trusted review settings changed", reason: []string{"repository configuration changed", "review"}, change: func(t *testing.T, f *retryFixture) {
 			config := "review:\n  conversation: true\n"
 			if err := os.WriteFile(filepath.Join(f.repo.WorkingPath, ".no-mistakes.yaml"), []byte(config), 0o644); err != nil {
 				t.Fatal(err)
@@ -462,24 +521,34 @@ func TestRetryRefusesACarriedReviewFromAnotherConfiguration(t *testing.T) {
 			gitCmd(t, f.repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
 			gitCmd(t, f.repo.WorkingPath, "reset", "--hard", f.submitted)
 		}},
-		{name: "selected agent changed", reason: "no longer selected", change: func(t *testing.T, f *retryFixture) {
-			if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: codex\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
+		{name: "selected agent changed", reason: []string{"no longer selected", "agent is now codex"}, change: func(t *testing.T, f *retryFixture) {
+			writeFakeAgents(t, f.p, "codex", "", "claude", "codex")
+		}},
+		{name: "selected agent changed after a retry of a retry", opts: retryFixtureOptions{twoHop: true}, reason: []string{"no longer selected", "agent is now codex"}, change: func(t *testing.T, f *retryFixture) {
+			writeFakeAgents(t, f.p, "codex", "", "claude", "codex")
+		}},
+		{name: "agent model changed", reason: []string{"agent_config.claude.model is now sonnet"}, change: func(t *testing.T, f *retryFixture) {
+			writeFakeAgents(t, f.p, "claude", "agent_config:\n  claude:\n    model: sonnet\n", "claude")
+		}},
+		{name: "recorded global configuration changed", opts: retryFixtureOptions{globalYAML: "agent: claude\n"}, reason: []string{"global configuration changed", "agent_path_override"}, change: func(t *testing.T, f *retryFixture) {
+			writeFakeAgents(t, f.p, "claude", "", "claude")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newRetryFixture(t, retryFixtureOptions{failInTest: true, beforeSource: func(t *testing.T, f *retryFixture) {
+			opts := tc.opts
+			opts.failInTest = true
+			opts.beforeSource = func(t *testing.T, f *retryFixture) {
 				if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: claude\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-			}})
+			}
+			f := newRetryFixture(t, opts)
 			tc.change(t, f)
 			result, err := f.retry(t, f.source.ID)
 			if err == nil {
 				t.Fatalf("retry started %s, want a configuration refusal", result.RunID)
 			}
-			for _, want := range []string{"compatible configuration proof failed", tc.reason, "no-mistakes rerun"} {
+			for _, want := range append([]string{"compatible configuration proof failed", "no-mistakes rerun"}, tc.reason...) {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("refusal %q does not contain %q", err, want)
 				}
@@ -492,17 +561,22 @@ func TestRetryRefusesACarriedReviewFromAnotherConfiguration(t *testing.T) {
 }
 
 func TestRetryContinuesAFailedTestWhenTheCarriedReviewConfigurationHolds(t *testing.T) {
-	f := newRetryFixture(t, retryFixtureOptions{failInTest: true, beforeSource: func(t *testing.T, f *retryFixture) {
-		if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: claude\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}})
-	result, err := f.retry(t, f.source.ID)
-	if err != nil {
-		t.Fatalf("retry: %v", err)
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
 	}
-	if run := waitForRunTerminalState(t, f.d, result.RunID); run.Status != types.RunCompleted || result.Step != types.StepTest {
-		t.Fatalf("retry = %+v, run = %s; want test continued to completion", result, run.Status)
+	for _, twoHop := range []bool{false, true} {
+		t.Run(fmt.Sprintf("two hop %v", twoHop), func(t *testing.T) {
+			f := newRetryFixture(t, retryFixtureOptions{failInTest: true, twoHop: twoHop, beforeSource: func(t *testing.T, f *retryFixture) {
+				writeFakeAgents(t, f.p, "claude", "agent_config:\n  claude:\n    model: opus\n", "claude")
+			}})
+			result, err := f.retry(t, f.source.ID)
+			if err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if run := waitForRunTerminalState(t, f.d, result.RunID); run.Status != types.RunCompleted || result.Step != types.StepTest {
+				t.Fatalf("retry = %+v, run = %s; want test continued to completion", result, run.Status)
+			}
+		})
 	}
 }
 

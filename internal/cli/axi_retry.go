@@ -41,7 +41,9 @@ func newAxiRetryCmd() *cobra.Command {
 			"failed on an agent invocation error, at or before Test; its preserved head\n" +
 			"is still anchored in the local gate; the working tree is clean at exactly\n" +
 			"that head (adopt it first with `no-mistakes axi sync --recover`); and the\n" +
-			"run's model profile and the repository's gates are unchanged. A failure\n" +
+			"run's model profile and the repository's gates are unchanged, and a carried\n" +
+			"Review's repository configuration, recorded global configuration, agent,\n" +
+			"and model are still the ones a new run would use. A failure\n" +
 			"about the change itself - a review finding, a failing test, a refused\n" +
 			"policy, a human decision - is never retried.\n\n" +
 			"The new run records which run, step, and round it continues. Like `axi\n" +

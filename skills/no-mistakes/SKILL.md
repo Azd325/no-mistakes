@@ -312,7 +312,8 @@ reviews the resulting head in full before Test. First adopt the preserved head
 with the reported `no-mistakes axi sync --recover` so your clean `HEAD` is
 exactly that head. Retry refuses, changing nothing, and names the failed proof
 whenever continuing is not provably safe - a failure about the change itself,
-a moved or dirty branch, another run, or changed configuration; then use
+a moved or dirty branch, another run, or changed configuration (repository
+settings, the agent, or its model since the carried Review ran); then use
 `rerun` or address the failure. Like `respond`, it blocks until the next
 `gate:` or outcome.
 
