@@ -61,6 +61,9 @@ type Executor struct {
 	agent  agent.Agent
 	steps  []Step
 	skips  map[types.StepName]bool
+	// retrySource is the failed run Execute continues instead of starting the
+	// pipeline from the beginning (SetRetrySource).
+	retrySource string
 
 	onEvent EventFunc
 
@@ -118,6 +121,15 @@ func (e *Executor) SetSkippedSteps(steps []types.StepName) {
 	for _, step := range steps {
 		e.skips[step] = true
 	}
+}
+
+// SetRetrySource makes Execute continue the failed run sourceRunID: it carries
+// the source's steps before its failed step, restarts the failed step from the
+// beginning, and runs every later step normally. Execute re-proves the
+// checkpoint against this executor's own steps and fails the run when the
+// source's record no longer matches them.
+func (e *Executor) SetRetrySource(sourceRunID string) {
+	e.retrySource = sourceRunID
 }
 
 // NewExecutor creates a pipeline executor.
@@ -412,11 +424,30 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	}
 	e.initializeRunScopes(run.ID)
 
+	start := 0
+	var carried []*db.StepResult
+	if e.retrySource != "" {
+		checkpoint, err := e.planRetry(run)
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		start, carried = checkpoint.Index, checkpoint.Steps
+	}
+
 	// Record every requested skip before any step can park. Recovery and
 	// revalidation already preserve skipped rows, so future skips must not
 	// depend on this executor's in-memory map surviving a daemon restart.
 	stepRecords := make(map[types.StepName]*db.StepResult)
-	for _, step := range e.steps {
+	for i, step := range e.steps {
+		if i < start {
+			sr, err := e.db.InsertCarriedStepResult(run.ID, carried[i])
+			if err != nil {
+				return e.failRun(run, repo, err, ctx)
+			}
+			stepRecords[step.Name()] = sr
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(sr.Status), "", "", sr.DurationMS)
+			continue
+		}
 		sr, err := e.db.InsertStepResult(run.ID, step.Name())
 		if err != nil {
 			return e.failRun(run, repo, fmt.Errorf("insert step result: %w", err))
@@ -435,7 +466,8 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	// Execute steps sequentially. A late repair may send the same run back
 	// through validation before any new head is published.
 	revalidating := false
-	for i := 0; i < len(e.steps); i++ {
+	retrying := e.retrySource != ""
+	for i := start; i < len(e.steps); i++ {
 		step := e.steps[i]
 		if ctx.Err() != nil {
 			return e.failRun(run, repo, context.Cause(ctx))
@@ -454,6 +486,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			state.outstandingFindings = ""
 			state.selectedOutstandingIDs = nil
 		}
+		state.retrying, retrying = retrying, false
 		skipRemaining, restartFrom, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, state)
 		if err != nil {
 			return e.failRun(run, repo, err, ctx)
@@ -488,6 +521,42 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
 	}
 	return nil
+}
+
+// planRetry proves the retry source's checkpoint against this run's steps and
+// adopts what the source carries forward: its per-run skips of steps that never
+// ran, and the review approval of a carried Review step, which still names the
+// head that step approved.
+func (e *Executor) planRetry(run *db.Run) (*RetryCheckpoint, error) {
+	source, err := e.db.GetRun(e.retrySource)
+	if err != nil {
+		return nil, fmt.Errorf("retry run %s: read the failed run: %w", e.retrySource, err)
+	}
+	if source == nil {
+		return nil, fmt.Errorf("retry run %s: the failed run is not recorded", e.retrySource)
+	}
+	checkpoint, err := PlanRetryCheckpoint(e.db, source, e.steps)
+	if err != nil {
+		return nil, fmt.Errorf("retry run %s: %w", e.retrySource, err)
+	}
+	for _, row := range checkpoint.Steps[checkpoint.Index+1:] {
+		if row.Status == types.StepStatusSkipped {
+			if e.skips == nil {
+				e.skips = make(map[types.StepName]bool)
+			}
+			e.skips[row.StepName] = true
+		}
+	}
+	for _, row := range checkpoint.Steps[:checkpoint.Index] {
+		if row.StepName == types.StepReview && row.Status == types.StepStatusCompleted && source.ReviewApprovedHeadSHA != nil {
+			approved := *source.ReviewApprovedHeadSHA
+			if err := e.db.UpdateRunReviewApprovedHeadSHA(run.ID, approved); err != nil {
+				return nil, fmt.Errorf("retry run %s: carry the review approval: %w", e.retrySource, err)
+			}
+			run.ReviewApprovedHeadSHA = &approved
+		}
+	}
+	return checkpoint, nil
 }
 
 func (e *Executor) stepIndex(name types.StepName) (int, error) {
@@ -545,6 +614,9 @@ type stepExecutionState struct {
 	// the parked round's findings_json, so recovering a parked gate restores the
 	// exact outstanding set the operator is deciding on. Unused by other steps.
 	outstandingFindings string
+	// retrying restarts the step a failed run failed in, at the start of the
+	// run that continues it (SetRetrySource).
+	retrying bool
 }
 
 func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionState, error) {
@@ -1213,8 +1285,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 	stepAgent := e.agent
 	if stepAgent != nil {
-		// Innermost: default-by-construction invocation deadline so a step
-		// that calls Agent.Run directly cannot hang the run.
+		stepAgent = &invocationFailureAgent{inner: stepAgent}
+		// Default-by-construction invocation deadline so a step that calls
+		// Agent.Run directly cannot hang the run.
 		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config), working: AgentWorkingTimeout(e.config)}
 		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
 		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
@@ -1317,6 +1390,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		nextTrigger = "answer"
 	case sctx.Fixing:
 		nextTrigger = "auto_fix"
+	case state.retrying:
+		nextTrigger = "retry"
+		writeLog(fmt.Sprintf("restarting %s from the beginning: run %s failed in this step on an agent invocation error", stepName, e.retrySource))
 	}
 	skipRemaining := false
 	stepSkipped := false
@@ -1348,7 +1424,11 @@ rounds:
 			redactedErr := safeurl.RedactText(err.Error())
 			fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
 			touchLogActivity("error: "+redactedErr, true)
-			if dbErr := e.db.FailStep(sr.ID, redactedErr, durationMS); dbErr != nil {
+			cause := ""
+			if errors.Is(err, ErrAgentInvocationFailed) {
+				cause = db.StepFailureCauseAgentInvocation
+			}
+			if dbErr := e.db.FailStepWithCause(sr.ID, redactedErr, durationMS, cause); dbErr != nil {
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
