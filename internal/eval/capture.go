@@ -169,6 +169,21 @@ func Capture(ctx context.Context, store *Store, p *paths.Paths, database *db.DB,
 	if err != nil {
 		return nil, fmt.Errorf("read source invocation metrics: %w", err)
 	}
+	if reviewStep.RoundsStepID() != reviewStep.ID {
+		origin, err := database.GetStepResult(reviewStep.RoundsStepID())
+		if err != nil || origin == nil {
+			return nil, fmt.Errorf("read the run that executed the carried review: %v", err)
+		}
+		carried, err := database.GetAgentInvocationsByRun(origin.RunID)
+		if err != nil {
+			return nil, fmt.Errorf("read carried review invocation metrics: %w", err)
+		}
+		for _, inv := range carried {
+			if inv.StepName == string(types.StepReview) {
+				invocations = append(invocations, inv)
+			}
+		}
+	}
 	captured := make([]Case, 0, len(reviewRounds))
 	for _, round := range reviewRounds {
 		if round.FindingsJSON == nil || strings.TrimSpace(*round.FindingsJSON) == "" {

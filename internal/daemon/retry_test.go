@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,8 +11,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/custody"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -199,6 +203,10 @@ type retryFixtureOptions struct {
 	failInTest   bool
 	twoHop       bool
 	globalYAML   string
+	// repoYAML replaces the effective repository configuration the review
+	// round records; empty records the configuration a new run would get.
+	repoYAML   string
+	invocation db.AgentInvocation
 }
 
 func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
@@ -232,10 +240,23 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 			err = d.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, "")
 		case name == types.StepReview && opts.failInTest:
 			if err = d.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, ""); err == nil {
-				_, err = d.InsertReviewStepRoundWithProvenance(sr.ID, 1, "initial", nil, nil, submitted, "", submitted, []byte(opts.globalYAML), nil, 1)
+				recorded := []byte(opts.repoYAML)
+				if opts.repoYAML == "" {
+					var effective *config.RepoConfig
+					if effective, err = effectiveRepoConfigAt(context.Background(), p.RepoDir(repo.ID), repo, submitted, submitted, "test"); err == nil {
+						recorded, err = yaml.Marshal(effective)
+					}
+				}
+				if err == nil {
+					_, err = d.InsertReviewStepRoundWithProvenance(sr.ID, 1, "initial", nil, nil, submitted, "", submitted, []byte(opts.globalYAML), recorded, 1)
+				}
 			}
 			if err == nil {
-				_, err = d.InsertAgentInvocation(db.AgentInvocation{RunID: source.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "claude", Model: "claude-opus-1", SessionMode: "fresh", StartedAt: 1, CompletedAt: 2, ExitStatus: "ok"})
+				inv := db.AgentInvocation{RunID: source.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "claude", Model: "claude-opus-1", SessionMode: "fresh", StartedAt: 1, CompletedAt: 2, ExitStatus: "ok"}
+				if opts.invocation.Agent != "" {
+					inv.Agent, inv.Model, inv.Purpose, inv.Round = opts.invocation.Agent, opts.invocation.Model, opts.invocation.Purpose, opts.invocation.Round
+				}
+				_, err = d.InsertAgentInvocation(inv)
 			}
 		case name == types.StepReview:
 			err = d.FailStepWithCause(sr.ID, "review agent: "+outage, 1, db.StepFailureCauseAgentInvocation)
@@ -527,6 +548,10 @@ func TestRetryRefusesACarriedReviewFromAnotherConfiguration(t *testing.T) {
 		{name: "selected agent changed after a retry of a retry", opts: retryFixtureOptions{twoHop: true}, reason: []string{"no longer selected", "agent is now codex"}, change: func(t *testing.T, f *retryFixture) {
 			writeFakeAgents(t, f.p, "codex", "", "claude", "codex")
 		}},
+		{name: "recorded repository configuration differs from the one a retry would use", opts: retryFixtureOptions{repoYAML: "review:\n  conversation: true\n"}, reason: []string{"repository configuration changed", "review"}, change: func(t *testing.T, f *retryFixture) {}},
+		{name: "review role model changed", opts: retryFixtureOptions{invocation: db.AgentInvocation{Agent: "codex", Model: "gpt-old", Purpose: "review", Round: 1}}, reason: []string{"agent_config.codex.model is now gpt-new"}, change: func(t *testing.T, f *retryFixture) {
+			writeFakeAgents(t, f.p, "claude", "review_agents:\n  reviewer:\n    agent: codex\n    model: gpt-new\n", "claude", "codex")
+		}},
 		{name: "agent model changed", reason: []string{"agent_config.claude.model is now sonnet"}, change: func(t *testing.T, f *retryFixture) {
 			writeFakeAgents(t, f.p, "claude", "agent_config:\n  claude:\n    model: sonnet\n", "claude")
 		}},
@@ -575,6 +600,33 @@ func TestRetryContinuesAFailedTestWhenTheCarriedReviewConfigurationHolds(t *test
 			}
 			if run := waitForRunTerminalState(t, f.d, result.RunID); run.Status != types.RunCompleted || result.Step != types.StepTest {
 				t.Fatalf("retry = %+v, run = %s; want test continued to completion", result, run.Status)
+			}
+		})
+	}
+}
+
+func TestRetryContinuesWhenTheCarriedReviewRanOnItsRoleAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	for _, tc := range []struct {
+		name       string
+		invocation db.AgentInvocation
+		extra      string
+	}{
+		{name: "reviewer role", invocation: db.AgentInvocation{Agent: "codex", Model: "gpt-5", Purpose: "review", Round: 1}, extra: "review_agents:\n  reviewer:\n    agent: codex\n    model: gpt-5\n"},
+		{name: "reviewer takeover round", invocation: db.AgentInvocation{Agent: "codex", Model: "gpt-5", Purpose: "review", Round: 3}, extra: "review_agents:\n  reviewer_after_round:\n    agent: codex\n    model: gpt-5\n    after_round: 2\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRetryFixture(t, retryFixtureOptions{failInTest: true, invocation: tc.invocation, beforeSource: func(t *testing.T, f *retryFixture) {
+				writeFakeAgents(t, f.p, "claude", tc.extra, "claude", "codex")
+			}})
+			result, err := f.retry(t, f.source.ID)
+			if err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if run := waitForRunTerminalState(t, f.d, result.RunID); run.Status != types.RunCompleted {
+				t.Fatalf("run = %s, want completed", run.Status)
 			}
 		})
 	}

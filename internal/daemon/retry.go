@@ -262,7 +262,7 @@ func (m *RunManager) proveRetryConfiguration(ctx context.Context, repo *db.Repo,
 		return fmt.Errorf("the repository's gates changed since the run started, so its step sequence would differ")
 	}
 	carried := checkpoint.Steps[:checkpoint.Index]
-	if err := m.proveCarriedReviewConfig(ctx, repo, source, globalCfg, currentRepoCfg, carried); err != nil {
+	if err := m.proveCarriedReviewConfig(globalCfg, currentRepoCfg, carried); err != nil {
 		return err
 	}
 	return m.proveCarriedAgent(ctx, source, cfg, carried)
@@ -270,9 +270,9 @@ func (m *RunManager) proveRetryConfiguration(ctx context.Context, repo *db.Repo,
 
 // proveCarriedReviewConfig compares the configuration a carried Review ran
 // under with the configuration a new run would get now: the repository
-// configuration rebuilt from the trusted default-branch commit its rounds
-// recorded, and the global configuration they recorded when it was captured.
-func (m *RunManager) proveCarriedReviewConfig(ctx context.Context, repo *db.Repo, source *db.Run, globalCfg *config.GlobalConfig, current *config.RepoConfig, carried []*db.StepResult) error {
+// effective repository configuration and the global configuration its rounds
+// recorded when they ran.
+func (m *RunManager) proveCarriedReviewConfig(globalCfg *config.GlobalConfig, current *config.RepoConfig, carried []*db.StepResult) error {
 	currentYAML, err := yaml.Marshal(current)
 	if err != nil {
 		return fmt.Errorf("serialize the repository configuration: %w", err)
@@ -285,33 +285,24 @@ func (m *RunManager) proveCarriedReviewConfig(ctx context.Context, repo *db.Repo
 		if err != nil {
 			return fmt.Errorf("read the carried review rounds: %w", err)
 		}
-		recordedSHA := ""
-		var recordedGlobal []byte
+		var recordedRepo, recordedGlobal []byte
 		for _, round := range rounds {
-			if round.TrustedConfigSHA != nil {
-				recordedSHA = *round.TrustedConfigSHA
+			if len(round.RepoConfigYAML) > 0 {
+				recordedRepo = round.RepoConfigYAML
 			}
 			if len(round.GlobalConfigYAML) > 0 {
 				recordedGlobal = round.GlobalConfigYAML
 			}
 		}
-		if recordedSHA == "" {
-			return fmt.Errorf("the carried review recorded no trusted configuration to compare, so rerun the pipeline instead")
+		if recordedRepo == nil {
+			return fmt.Errorf("the carried review recorded no repository configuration to compare, so rerun the pipeline instead")
 		}
-		recorded, err := effectiveRepoConfigAt(ctx, m.paths.RepoDir(repo.ID), repo, recordedSHA, source.HeadSHA, "retry configuration")
-		if err != nil {
-			return err
-		}
-		recordedYAML, err := yaml.Marshal(recorded)
-		if err != nil {
-			return fmt.Errorf("serialize the carried review's repository configuration: %w", err)
-		}
-		changed, err := changedSettings(recordedYAML, currentYAML)
+		changed, err := changedSettings(recordedRepo, currentYAML)
 		if err != nil {
 			return err
 		}
 		if len(changed) > 0 {
-			return fmt.Errorf("the repository configuration changed since the carried review ran under trusted commit %s (%s), so its approval does not carry; rerun the pipeline instead", recordedSHA, strings.Join(changed, ", "))
+			return fmt.Errorf("the repository configuration changed since the carried review ran (%s), so its approval does not carry; rerun the pipeline instead", strings.Join(changed, ", "))
 		}
 		if recordedGlobal == nil {
 			continue
@@ -384,14 +375,39 @@ func (m *RunManager) proveCarriedAgent(ctx context.Context, source *db.Run, cfg 
 				}
 				resolved = true
 			}
+			expected := cfgForInvocation(cfg, inv)
 			name := types.AgentName(inv.Agent)
-			if name != cfg.Agent && !slices.Contains(cfg.Agents, name) {
-				return fmt.Errorf("carried step %s ran on agent %s, which is no longer selected (agent is now %s); rerun the pipeline instead", inv.StepName, inv.Agent, cfg.Agent)
+			if name != expected.Agent && !slices.Contains(expected.Agents, name) {
+				return fmt.Errorf("carried step %s ran on agent %s, which is no longer selected (agent is now %s); rerun the pipeline instead", inv.StepName, inv.Agent, expected.Agent)
 			}
-			if model := cfg.AgentProfileFor(name).Model; model != "" && inv.Model != "" && !strings.Contains(inv.Model, model) {
+			if model := expected.AgentProfileFor(name).Model; model != "" && inv.Model != "" && !strings.Contains(inv.Model, model) {
 				return fmt.Errorf("carried step %s ran %s on model %s, but agent_config.%s.model is now %s; rerun the pipeline instead", inv.StepName, inv.Agent, inv.Model, inv.Agent, model)
 			}
 		}
 	}
 	return nil
+}
+
+// cfgForInvocation returns the configuration that would serve inv in a new run,
+// selecting a review_agents role from the call's Purpose and Round the way
+// newPipelineAgent routes it.
+func cfgForInvocation(cfg *config.Config, inv db.AgentInvocation) *config.Config {
+	var role, lateRole string
+	switch inv.Purpose {
+	case "review", "review-coverage":
+		role, lateRole = config.RoleReviewer, config.RoleReviewerAfterRound
+	case "review-fix":
+		role, lateRole = config.RoleFixer, config.RoleFixerAfterRound
+	default:
+		return cfg
+	}
+	if late, ok := cfg.ReviewAgents[lateRole]; ok {
+		if from := cfg.ReviewAgentTakeoverRound(lateRole); from > 0 && inv.Round >= from {
+			return cfg.ForReviewAgent(late)
+		}
+	}
+	if entry, ok := cfg.ReviewAgents[role]; ok {
+		return cfg.ForReviewAgent(entry)
+	}
+	return cfg
 }
