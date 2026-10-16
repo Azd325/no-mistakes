@@ -196,6 +196,7 @@ type retryFixtureOptions struct {
 	beforeSource func(t *testing.T, f *retryFixture)
 	profile      *agentcfg.PiProfile
 	plan         *verificationplan.Snapshot
+	failInTest   bool
 }
 
 func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
@@ -223,11 +224,21 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 		if err != nil {
 			t.Fatal(err)
 		}
-		switch name {
-		case types.StepRebase:
+		const outage = "claude exited with status 1: provider processing error"
+		switch {
+		case name == types.StepRebase:
 			err = d.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, "")
-		case types.StepReview:
-			err = d.FailStepWithCause(sr.ID, "review agent: claude exited with status 1: provider processing error", 1, db.StepFailureCauseAgentInvocation)
+		case name == types.StepReview && opts.failInTest:
+			if err = d.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, ""); err == nil {
+				_, err = d.InsertReviewStepRoundWithProvenance(sr.ID, 1, "initial", nil, nil, submitted, "", submitted, nil, nil, 1)
+			}
+			if err == nil {
+				_, err = d.InsertAgentInvocation(db.AgentInvocation{RunID: source.ID, StepName: string(types.StepReview), Round: 1, Purpose: "review", Agent: "claude", SessionMode: "fresh", StartedAt: 1, CompletedAt: 2, ExitStatus: "ok"})
+			}
+		case name == types.StepReview:
+			err = d.FailStepWithCause(sr.ID, "review agent: "+outage, 1, db.StepFailureCauseAgentInvocation)
+		case name == types.StepTest && opts.failInTest:
+			err = d.FailStepWithCause(sr.ID, "test agent: "+outage, 1, db.StepFailureCauseAgentInvocation)
 		}
 		if err != nil {
 			t.Fatal(err)
@@ -432,6 +443,66 @@ func TestRetryRefusesUnlessEveryProofHolds(t *testing.T) {
 				t.Fatalf("refusal moved the caller head to %s", got)
 			}
 		})
+	}
+}
+
+func TestRetryRefusesACarriedReviewFromAnotherConfiguration(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, f *retryFixture)
+		reason string
+	}{
+		{name: "trusted review settings changed", reason: "repository configuration changed", change: func(t *testing.T, f *retryFixture) {
+			config := "review:\n  conversation: true\n"
+			if err := os.WriteFile(filepath.Join(f.repo.WorkingPath, ".no-mistakes.yaml"), []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, f.repo.WorkingPath, "add", ".no-mistakes.yaml")
+			gitCmd(t, f.repo.WorkingPath, "commit", "-m", "tighten review")
+			gitCmd(t, f.repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
+			gitCmd(t, f.repo.WorkingPath, "reset", "--hard", f.submitted)
+		}},
+		{name: "selected agent changed", reason: "no longer selected", change: func(t *testing.T, f *retryFixture) {
+			if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: codex\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRetryFixture(t, retryFixtureOptions{failInTest: true, beforeSource: func(t *testing.T, f *retryFixture) {
+				if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: claude\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}})
+			tc.change(t, f)
+			result, err := f.retry(t, f.source.ID)
+			if err == nil {
+				t.Fatalf("retry started %s, want a configuration refusal", result.RunID)
+			}
+			for _, want := range []string{"compatible configuration proof failed", tc.reason, "no-mistakes rerun"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal %q does not contain %q", err, want)
+				}
+			}
+			if got := f.executions.Load(); got != 0 {
+				t.Fatalf("refusal executed %d steps", got)
+			}
+		})
+	}
+}
+
+func TestRetryContinuesAFailedTestWhenTheCarriedReviewConfigurationHolds(t *testing.T) {
+	f := newRetryFixture(t, retryFixtureOptions{failInTest: true, beforeSource: func(t *testing.T, f *retryFixture) {
+		if err := os.WriteFile(f.p.ConfigFile(), []byte("agent: claude\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}})
+	result, err := f.retry(t, f.source.ID)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if run := waitForRunTerminalState(t, f.d, result.RunID); run.Status != types.RunCompleted || result.Step != types.StepTest {
+		t.Fatalf("retry = %+v, run = %s; want test continued to completion", result, run.Status)
 	}
 }
 

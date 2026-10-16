@@ -89,3 +89,29 @@ func TestRunRetryLinksTheFailureAndItsContinuation(t *testing.T) {
 		t.Fatal("a failed run was continued twice")
 	}
 }
+
+func TestPreviousRunReviewRoundsFollowACarriedRowToItsOrigin(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/tmp/repo", "origin", "main")
+	first, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	original, err := d.InsertStepResult(first.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepRound(original.ID, 1, "initial", nil, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepWithStatus(original.ID, types.StepStatusCompleted, 0, 10, ""); err != nil {
+		t.Fatal(err)
+	}
+	original, _ = d.GetStepResult(original.ID)
+	second, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	if _, err := d.InsertCarriedStepResult(second.ID, original); err != nil {
+		t.Fatal(err)
+	}
+
+	previous, err := d.GetPreviousRunReviewRounds(repo.ID, "feature", "superseding-run")
+	if err != nil || previous == nil || previous.RunID != second.ID || len(previous.Rounds) != 1 || previous.Rounds[0].StepResultID != original.ID {
+		t.Fatalf("previous = %+v (err %v), want the carried row's rounds from %s", previous, err, original.ID)
+	}
+}

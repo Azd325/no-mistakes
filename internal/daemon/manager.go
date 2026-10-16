@@ -1319,7 +1319,7 @@ func fetchTrustedDefaultBranchSHA(ctx context.Context, gateDir string, repo *db.
 // the first point where a trusted repository Pi override can replace a global
 // auto or non-Pi selection, so profile resolution must not reject it earlier.
 func (m *RunManager) validatePiProfileAgentsBeforeCancel(ctx context.Context, repo *db.Repo, headSHA string, globalCfg *config.GlobalConfig) error {
-	cfg, err := m.effectiveConfigBeforeRun(ctx, repo, headSHA, globalCfg, "Pi run profile")
+	cfg, _, err := m.effectiveConfigBeforeRun(ctx, repo, headSHA, globalCfg, "Pi run profile")
 	if err != nil {
 		return err
 	}
@@ -1329,12 +1329,22 @@ func (m *RunManager) validatePiProfileAgentsBeforeCancel(ctx context.Context, re
 // effectiveConfigBeforeRun resolves the configuration a run at headSHA would
 // get, from the gate and a privately fetched trusted default branch, before
 // any run is created or superseded. purpose names the caller in errors.
-func (m *RunManager) effectiveConfigBeforeRun(ctx context.Context, repo *db.Repo, headSHA string, globalCfg *config.GlobalConfig, purpose string) (*config.Config, error) {
+func (m *RunManager) effectiveConfigBeforeRun(ctx context.Context, repo *db.Repo, headSHA string, globalCfg *config.GlobalConfig, purpose string) (*config.Config, *config.RepoConfig, error) {
 	gateDir := m.paths.RepoDir(repo.ID)
 	trustedSHA, err := fetchTrustedDefaultBranchSHA(ctx, gateDir, repo, purpose)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	effective, err := effectiveRepoConfigAt(ctx, gateDir, repo, trustedSHA, headSHA, purpose)
+	if err != nil {
+		return nil, nil, err
+	}
+	return config.MergeForRemote(globalCfg, effective, repo.UpstreamURL), effective, nil
+}
+
+// effectiveRepoConfigAt resolves the repository configuration a run at headSHA
+// gets under the trusted default-branch commit trustedSHA.
+func effectiveRepoConfigAt(ctx context.Context, gateDir string, repo *db.Repo, trustedSHA, headSHA, purpose string) (*config.RepoConfig, error) {
 	if err := assertTrustedConfigReadable(ctx, gateDir, repo.DefaultBranch, trustedSHA, purpose); err != nil {
 		return nil, err
 	}
@@ -1344,8 +1354,7 @@ func (m *RunManager) effectiveConfigBeforeRun(ctx context.Context, repo *db.Repo
 		return nil, err
 	}
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
-	effective := config.EffectiveRepoConfig(pushedRepoCfg, trustedRepoCfg, allowRepoCommands)
-	return config.MergeForRemote(globalCfg, effective, repo.UpstreamURL), nil
+	return config.EffectiveRepoConfig(pushedRepoCfg, trustedRepoCfg, allowRepoCommands), nil
 }
 
 func loadRepoConfigAtSHA(ctx context.Context, dir, sha, purpose string) (*config.RepoConfig, error) {

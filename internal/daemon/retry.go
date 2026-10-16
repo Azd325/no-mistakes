@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
@@ -14,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"gopkg.in/yaml.v3"
 )
 
 // retryLaunch is what a continuation run takes from the failed run it
@@ -171,7 +174,7 @@ func (m *RunManager) proveRetry(ctx context.Context, repo *db.Repo, branch, runI
 	default:
 		return nil, refuseRetry(runID, "matching head", "the clean local head %s is not the run's preserved head %s; inspect `no-mistakes axi status` and follow `branch_sync.next_action.command` (`no-mistakes axi sync --recover` adopts the preserved head) before retrying", callerHeadSHA, source.HeadSHA)
 	}
-	if err := m.proveRetryConfiguration(ctx, repo, source, gates); err != nil {
+	if err := m.proveRetryConfiguration(ctx, repo, source, gates, checkpoint); err != nil {
 		return nil, refuseRetry(runID, "compatible configuration", "%v", err)
 	}
 	failed := checkpoint.Failed()
@@ -222,9 +225,11 @@ func (m *RunManager) provePreservedHead(ctx context.Context, repo *db.Repo, sour
 
 // proveRetryConfiguration requires what the failed run pinned at creation to
 // resolve the same way now: the model profile, and the gates, which decide the
-// step sequence the carried record is matched against. Everything else is
-// re-read from the live default branch, as for any recovered run.
-func (m *RunManager) proveRetryConfiguration(ctx context.Context, repo *db.Repo, source *db.Run, pinned []config.Gate) error {
+// step sequence the carried record is matched against. It also requires the
+// configuration that produced every carried step result to be the one a new
+// run would use: the repository configuration the carried Review rounds
+// recorded, and the agent that served the carried steps.
+func (m *RunManager) proveRetryConfiguration(ctx context.Context, repo *db.Repo, source *db.Run, pinned []config.Gate, checkpoint *pipeline.RetryCheckpoint) error {
 	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
 	if err != nil {
 		return fmt.Errorf("load global config: %w", err)
@@ -238,7 +243,7 @@ func (m *RunManager) proveRetryConfiguration(ctx context.Context, repo *db.Repo,
 			return fmt.Errorf("the run's model profile now resolves to %s/%s instead of %s/%s", resolved.Model, resolved.Effort, source.PiProfile.Model, source.PiProfile.Effort)
 		}
 	}
-	cfg, err := m.effectiveConfigBeforeRun(ctx, repo, source.HeadSHA, globalCfg, "retry configuration")
+	cfg, currentRepoCfg, err := m.effectiveConfigBeforeRun(ctx, repo, source.HeadSHA, globalCfg, "retry configuration")
 	if err != nil {
 		return err
 	}
@@ -252,6 +257,76 @@ func (m *RunManager) proveRetryConfiguration(ctx context.Context, repo *db.Repo,
 	}
 	if current != recorded {
 		return fmt.Errorf("the repository's gates changed since the run started, so its step sequence would differ")
+	}
+	carried := checkpoint.Steps[:checkpoint.Index]
+	if err := m.proveCarriedRepoConfig(ctx, repo, source, currentRepoCfg, carried); err != nil {
+		return err
+	}
+	return m.proveCarriedAgent(source, cfg, carried)
+}
+
+// proveCarriedRepoConfig compares the repository configuration a carried
+// Review round ran under, rebuilt from the trusted default-branch commit that
+// round recorded, with the configuration a new run would get now.
+func (m *RunManager) proveCarriedRepoConfig(ctx context.Context, repo *db.Repo, source *db.Run, current *config.RepoConfig, carried []*db.StepResult) error {
+	for _, row := range carried {
+		if row.StepName != types.StepReview || row.Status != types.StepStatusCompleted {
+			continue
+		}
+		rounds, err := m.db.GetRoundsByStep(row.RoundsStepID())
+		if err != nil {
+			return fmt.Errorf("read the carried review rounds: %w", err)
+		}
+		recordedSHA := ""
+		for _, round := range rounds {
+			if round.TrustedConfigSHA != nil {
+				recordedSHA = *round.TrustedConfigSHA
+			}
+		}
+		if recordedSHA == "" {
+			return fmt.Errorf("the carried review recorded no trusted configuration to compare, so rerun the pipeline instead")
+		}
+		recorded, err := effectiveRepoConfigAt(ctx, m.paths.RepoDir(repo.ID), repo, recordedSHA, source.HeadSHA, "retry configuration")
+		if err != nil {
+			return err
+		}
+		recordedYAML, err := yaml.Marshal(recorded)
+		if err != nil {
+			return fmt.Errorf("serialize the carried review's repository configuration: %w", err)
+		}
+		currentYAML, err := yaml.Marshal(current)
+		if err != nil {
+			return fmt.Errorf("serialize the repository configuration: %w", err)
+		}
+		if !bytes.Equal(recordedYAML, currentYAML) {
+			return fmt.Errorf("the repository configuration changed since the carried review ran under trusted commit %s, so its approval does not carry; rerun the pipeline instead", recordedSHA)
+		}
+	}
+	return nil
+}
+
+// proveCarriedAgent requires every agent that served a carried step to still be
+// selected. A run pinned to a Pi profile is proven by the profile instead.
+func (m *RunManager) proveCarriedAgent(source *db.Run, cfg *config.Config, carried []*db.StepResult) error {
+	if source.PiProfile != nil || cfg.Agent == types.AgentAuto || slices.Contains(cfg.Agents, types.AgentAuto) {
+		return nil
+	}
+	carriedSteps := make(map[string]bool, len(carried))
+	for _, row := range carried {
+		carriedSteps[string(row.StepName)] = true
+	}
+	invocations, err := m.db.GetAgentInvocationsByRun(source.ID)
+	if err != nil {
+		return fmt.Errorf("read the run's agent invocations: %w", err)
+	}
+	for _, inv := range invocations {
+		if !carriedSteps[inv.StepName] || inv.ExitStatus != "ok" {
+			continue
+		}
+		name := types.AgentName(inv.Agent)
+		if name != cfg.Agent && !slices.Contains(cfg.Agents, name) {
+			return fmt.Errorf("carried step %s ran on agent %s, which is no longer selected (agent is now %s); rerun the pipeline instead", inv.StepName, inv.Agent, cfg.Agent)
+		}
 	}
 	return nil
 }
