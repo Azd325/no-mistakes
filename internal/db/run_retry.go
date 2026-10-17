@@ -57,3 +57,11 @@ func (d *DB) getRunRetry(query, id string) (*RunRetry, error) {
 	}
 	return r, nil
 }
+
+// DeleteRun removes a run record with every row that cascades from it. A
+// retry refused at launch uses it so the refused continuation never becomes
+// the branch's latest run.
+func (d *DB) DeleteRun(id string) error {
+	_, err := d.sql.Exec(`DELETE FROM runs WHERE id = ?`, id)
+	return err
+}

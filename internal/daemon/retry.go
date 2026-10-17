@@ -443,6 +443,16 @@ func (r *retryLaunch) proveAtLaunch(ctx context.Context, m *RunManager, globalCf
 	return nil
 }
 
+// discardRefusedRetryRun deletes the continuation run row and the evidence
+// directory a refused retry created, so the failed run stays the branch's
+// latest run and can be retried again once the cause is fixed.
+func (m *RunManager) discardRefusedRetryRun(runID string, cfg *config.Config) {
+	if err := m.db.DeleteRun(runID); err != nil {
+		m.db.UpdateRunError(runID, fmt.Sprintf("discard refused retry: %s", err))
+	}
+	os.RemoveAll(m.paths.RunEvidenceDir(cfg.Test.Evidence.LocalRoot, runID))
+}
+
 // RetryProofConversation names the proof that a carried Review's question
 // records are still readable.
 const RetryProofConversation = "review conversation"

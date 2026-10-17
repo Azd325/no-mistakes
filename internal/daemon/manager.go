@@ -1664,12 +1664,12 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 	if retry != nil {
 		if err := retry.proveAtLaunch(ctx, m, globalCfg, cfg, effectiveRepoCfg, run.ID); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
+			m.discardRefusedRetryRun(run.ID, cfg)
 			trackStartFailure("retry_proof")
 			return "", err
 		}
 		if err := retry.record(m.db, run); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
+			m.discardRefusedRetryRun(run.ID, cfg)
 			trackStartFailure("record_retry")
 			return "", err
 		}

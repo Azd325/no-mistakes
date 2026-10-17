@@ -773,6 +773,30 @@ func TestRetryRefusesACarriedReviewWhoseQuestionsCannotBeRead(t *testing.T) {
 	f.requireNothingLaunched(t)
 }
 
+func TestRetryRefusedAtLaunchCanBeRetriedOnceTheCauseIsFixed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	findings := reviewQuestionFindings
+	f := newRetryFixture(t, retryFixtureOptions{failInTest: true, findings: &findings, beforeSource: func(t *testing.T, f *retryFixture) {
+		writeFakeAgents(t, f.p, "claude", "", "claude")
+	}})
+	m := f.manager(t, &conversationProbeStep{})
+	if _, err := m.HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead); err == nil {
+		t.Fatal("retry started, want a refusal: the conversation is gone")
+	}
+	f.requireNothingLaunched(t)
+
+	f.writeSourceConversation(t)
+	link, err := m.HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead)
+	if err != nil {
+		t.Fatalf("second retry after restoring the conversation: %v", err)
+	}
+	if run := waitForRunTerminalState(t, f.d, link.RunID); run.Status != types.RunCompleted {
+		t.Fatalf("continuation = %s, want completed", run.Status)
+	}
+}
+
 func TestRetryRefusesWhenTheConfigurationChangesBetweenTheProofAndTheLaunch(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the agent stand-ins are POSIX shell scripts")
@@ -817,6 +841,7 @@ func (f *retryFixture) requireNothingLaunched(t *testing.T) {
 		if run.ID == f.source.ID {
 			continue
 		}
+		t.Errorf("refused retry left run %s (%s) behind, want only the failed run", run.ID, run.Status)
 		rows, err := f.d.GetStepsByRun(run.ID)
 		if err != nil || len(rows) != 0 {
 			t.Errorf("refused continuation %s has steps %+v (err %v), want none", run.ID, rows, err)
