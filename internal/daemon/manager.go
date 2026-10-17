@@ -52,9 +52,11 @@ type RunManager struct {
 	dones        map[string]chan struct{}           // runID → closed when goroutine exits
 	wg           sync.WaitGroup                     // tracks background run goroutines
 	shuttingDown atomic.Bool                        // prevents new runs during shutdown
-	db           *db.DB
-	paths        *paths.Paths
-	steps        StepFactory
+
+	afterRetryProof func() // test seam: runs between HandleRetry's proof and the launch
+	db              *db.DB
+	paths           *paths.Paths
+	steps           StepFactory
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -1532,14 +1534,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			return "", fmt.Errorf("persist closing issue references: %w", err)
 		}
 	}
-	if retry != nil {
-		if err := retry.record(m.db, run); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
-			trackStartFailure("record_retry")
-			return "", err
-		}
-	}
-
 	// Legacy launches retain their existing failed-row diagnostics on a bad
 	// global config. Explicit profiles already resolved before supersession.
 	if globalCfgErr != nil {
@@ -1667,6 +1661,18 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("review_path_instructions_budget")
 		return "", err
+	}
+	if retry != nil {
+		if err := retry.proveAtLaunch(ctx, m, globalCfg, cfg, effectiveRepoCfg, run.ID); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("retry_proof")
+			return "", err
+		}
+		if err := retry.record(m.db, run); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("record_retry")
+			return "", err
+		}
 	}
 	if run.PiProfile != nil {
 		if err := cfg.ValidatePiProfileAgents(); err != nil {

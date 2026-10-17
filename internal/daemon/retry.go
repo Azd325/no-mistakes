@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"gopkg.in/yaml.v3"
 )
@@ -24,8 +27,10 @@ import (
 // continues: the run itself, whose record the executor re-proves and carries,
 // and the audit link written before the continuation can execute anything.
 type retryLaunch struct {
-	source *db.Run
-	link   db.RunRetry
+	source     *db.Run
+	link       db.RunRetry
+	gates      []config.Gate
+	checkpoint *pipeline.RetryCheckpoint
 }
 
 // record writes the audit link and the failed run's exact intent onto the
@@ -97,6 +102,9 @@ func (m *RunManager) HandleRetry(ctx context.Context, repoID, branch, runID, cal
 		launch, err := m.proveRetry(ctx, repo, branch, runID, callerHeadSHA)
 		if err != nil {
 			return "", err
+		}
+		if m.afterRetryProof != nil {
+			m.afterRetryProof()
 		}
 		source := launch.source
 		prBaseBranch := ""
@@ -185,7 +193,7 @@ func (m *RunManager) proveRetry(ctx context.Context, repo *db.Repo, branch, runI
 	if failed.Error != nil {
 		sourceError = *failed.Error
 	}
-	return &retryLaunch{source: source, link: db.RunRetry{
+	return &retryLaunch{source: source, gates: gates, checkpoint: checkpoint, link: db.RunRetry{
 		SourceRunID:       source.ID,
 		StepName:          failed.StepName,
 		SourceRound:       checkpoint.Round,
@@ -250,6 +258,14 @@ func (m *RunManager) proveRetryConfiguration(ctx context.Context, repo *db.Repo,
 	if err != nil {
 		return err
 	}
+	return m.proveConfigurationMatches(ctx, source, globalCfg, cfg, currentRepoCfg, pinned, checkpoint)
+}
+
+// proveConfigurationMatches compares a resolved configuration with the one the
+// failed run and its carried steps ran under. The launch calls it again with
+// the configuration the continuation run actually loaded, so a change between
+// the proof and the launch cannot carry a Review approval.
+func (m *RunManager) proveConfigurationMatches(ctx context.Context, source *db.Run, globalCfg *config.GlobalConfig, cfg *config.Config, currentRepoCfg *config.RepoConfig, pinned []config.Gate, checkpoint *pipeline.RetryCheckpoint) error {
 	current, err := config.MarshalGates(cfg.Gates)
 	if err != nil {
 		return fmt.Errorf("resolve the repository's gates: %w", err)
@@ -410,4 +426,75 @@ func cfgForInvocation(cfg *config.Config, inv db.AgentInvocation) *config.Config
 		return cfg.ForReviewAgent(entry)
 	}
 	return cfg
+}
+
+// proveAtLaunch repeats the configuration proof against the configuration the
+// continuation run loaded, then carries the failed run's Review conversation
+// into the run's own evidence directory. It refuses, naming the proof, before
+// the audit link or any carried step exists.
+func (r *retryLaunch) proveAtLaunch(ctx context.Context, m *RunManager, globalCfg *config.GlobalConfig, cfg *config.Config, repoCfg *config.RepoConfig, runID string) error {
+	launched := *cfg
+	if err := m.proveConfigurationMatches(ctx, r.source, globalCfg, &launched, repoCfg, r.gates, r.checkpoint); err != nil {
+		return refuseRetry(r.source.ID, "compatible configuration", "%v", err)
+	}
+	if err := m.carryReviewConversation(r, cfg, runID); err != nil {
+		return refuseRetry(r.source.ID, RetryProofConversation, "%v", err)
+	}
+	return nil
+}
+
+// RetryProofConversation names the proof that a carried Review's question
+// records are still readable.
+const RetryProofConversation = "review conversation"
+
+// carryReviewConversation copies the failed run's review conversation files
+// into the continuation run's evidence directory, where the PR step reads
+// them. A carried Review that recorded a question whose files can no longer be
+// read is refused: the open question would otherwise vanish from the PR.
+func (m *RunManager) carryReviewConversation(r *retryLaunch, cfg *config.Config, runID string) error {
+	var review *db.StepResult
+	for _, row := range r.checkpoint.Steps[:r.checkpoint.Index] {
+		if row.StepName == types.StepReview {
+			review = row
+		}
+	}
+	if review == nil {
+		return nil
+	}
+	rounds, err := m.db.GetRoundsByStep(review.RoundsStepID())
+	if err != nil {
+		return fmt.Errorf("read the carried review rounds: %w", err)
+	}
+	asked := false
+	for _, round := range rounds {
+		if round.FindingsJSON != nil && pipeline.HasUnansweredReviewQuestion(*round.FindingsJSON) {
+			asked = true
+		}
+	}
+	local := cfg.Test.Evidence.LocalRoot
+	src := reviewqa.Dir(m.paths.RunEvidenceDir(local, r.source.ID))
+	dst := reviewqa.Dir(m.paths.RunEvidenceDir(local, runID))
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		if asked {
+			return fmt.Errorf("the carried review asked a question, but its conversation in %s cannot be read (%v), so rerun the pipeline instead", src, err)
+		}
+		return nil
+	}
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return fmt.Errorf("create the review conversation directory: %w", err)
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(src, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("read the carried review conversation: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(dst, entry.Name()), data, 0o644); err != nil {
+			return fmt.Errorf("carry the review conversation: %w", err)
+		}
+	}
+	return nil
 }

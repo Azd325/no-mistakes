@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 )
@@ -207,6 +209,8 @@ type retryFixtureOptions struct {
 	// round records; empty records the configuration a new run would get.
 	repoYAML   string
 	invocation db.AgentInvocation
+	// findings is the findings JSON the carried review round recorded.
+	findings *string
 }
 
 func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
@@ -248,7 +252,7 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 					}
 				}
 				if err == nil {
-					_, err = d.InsertReviewStepRoundWithProvenance(sr.ID, 1, "initial", nil, nil, submitted, "", submitted, []byte(opts.globalYAML), recorded, 1)
+					_, err = d.InsertReviewStepRoundWithProvenance(sr.ID, 1, "initial", opts.findings, nil, submitted, "", submitted, []byte(opts.globalYAML), recorded, 1)
 				}
 			}
 			if err == nil {
@@ -679,5 +683,146 @@ func TestRunInfoReportsACarriedStepsWorkFromTheRunItWasCarriedFrom(t *testing.T)
 	info := stepToInfo(d, carried)
 	if info.RoundCount != 2 || info.FixRoundCount != 1 || info.ReportedFindings != 1 || info.FixedFindings != 1 || len(info.FixSummaries) != 1 {
 		t.Fatalf("carried review info = %+v, want the source run's two rounds, one fixed finding, and its fix summary", info)
+	}
+}
+
+// conversationProbeStep records the review conversation its run can read.
+type conversationProbeStep struct {
+	mu        sync.Mutex
+	open      []string
+	withdrawn []string
+}
+
+func (s *conversationProbeStep) Name() types.StepName { return types.StepTest }
+
+func (s *conversationProbeStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	conv, err := reviewqa.Load(reviewqa.Dir(sctx.EvidenceDir))
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, entry := range conv.Open() {
+		s.open = append(s.open, entry.ID)
+	}
+	for _, entry := range conv.Withdrawn() {
+		s.withdrawn = append(s.withdrawn, entry.ID)
+	}
+	return &pipeline.StepOutcome{}, nil
+}
+
+func (f *retryFixture) manager(t *testing.T, test pipeline.Step) *RunManager {
+	t.Helper()
+	m := NewRunManager(f.d, f.p, func() []pipeline.Step {
+		return []pipeline.Step{&countingStep{name: types.StepRebase, count: f.executions}, &countingStep{name: types.StepReview, count: f.executions}, test}
+	})
+	t.Cleanup(m.Shutdown)
+	return m
+}
+
+func (f *retryFixture) writeSourceConversation(t *testing.T) {
+	t.Helper()
+	dir := reviewqa.Dir(f.p.RunEvidenceDir("", f.source.ID))
+	appendAgentQuestionLine(t, dir, `{"id":"q1","kind":"question","question":"keep the legacy route?","options":["keep","remove"],"weight":"major"}`)
+	appendAgentQuestionLine(t, dir, `{"id":"q2","kind":"question","question":"rename the table?","options":["yes","no"],"weight":"major"}`)
+	appendAgentQuestionLine(t, dir, `{"id":"q2","kind":"retract","reason":"answered by the migration note"}`)
+}
+
+const reviewQuestionFindings = `{"findings":[{"id":"question-q1","severity":"warning","description":"keep the legacy route?","action":"ask-user","category":"review-question"}],"summary":"one question"}`
+
+func TestRetryCarriesTheReviewConversationOfACarriedReview(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	findings := reviewQuestionFindings
+	f := newRetryFixture(t, retryFixtureOptions{failInTest: true, findings: &findings, beforeSource: func(t *testing.T, f *retryFixture) {
+		writeFakeAgents(t, f.p, "claude", "", "claude")
+	}})
+	f.source, _ = f.d.GetRun(f.source.ID)
+	f.writeSourceConversation(t)
+	probe := &conversationProbeStep{}
+	link, err := f.manager(t, probe).HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if run := waitForRunTerminalState(t, f.d, link.RunID); run.Status != types.RunCompleted {
+		t.Fatalf("continuation = %s, want completed", run.Status)
+	}
+	if !slices.Equal(probe.open, []string{"q1"}) || !slices.Equal(probe.withdrawn, []string{"q2"}) {
+		t.Fatalf("continuation read open %v, withdrawn %v; want the open q1 and the withdrawn q2", probe.open, probe.withdrawn)
+	}
+}
+
+func TestRetryRefusesACarriedReviewWhoseQuestionsCannotBeRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	findings := reviewQuestionFindings
+	f := newRetryFixture(t, retryFixtureOptions{failInTest: true, findings: &findings, beforeSource: func(t *testing.T, f *retryFixture) {
+		writeFakeAgents(t, f.p, "claude", "", "claude")
+	}})
+	_, err := f.manager(t, &conversationProbeStep{}).HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead)
+	if err == nil {
+		t.Fatal("retry started, want a refusal: the carried review asked a question and its conversation is gone")
+	}
+	for _, want := range []string{"review conversation proof failed", "no-mistakes rerun"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not contain %q", err, want)
+		}
+	}
+	f.requireNothingLaunched(t)
+}
+
+func TestRetryRefusesWhenTheConfigurationChangesBetweenTheProofAndTheLaunch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	f := newRetryFixture(t, retryFixtureOptions{failInTest: true, beforeSource: func(t *testing.T, f *retryFixture) {
+		writeFakeAgents(t, f.p, "claude", "", "claude")
+	}})
+	m := f.manager(t, &conversationProbeStep{})
+	m.afterRetryProof = func() {
+		if err := os.WriteFile(filepath.Join(f.repo.WorkingPath, ".no-mistakes.yaml"), []byte("review:\n  conversation: true\n"), 0o644); err != nil {
+			t.Error(err)
+		}
+		gitCmd(t, f.repo.WorkingPath, "add", ".no-mistakes.yaml")
+		gitCmd(t, f.repo.WorkingPath, "commit", "-m", "tighten review")
+		gitCmd(t, f.repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
+		gitCmd(t, f.repo.WorkingPath, "reset", "--hard", f.submitted)
+	}
+	_, err := m.HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead)
+	if err == nil {
+		t.Fatal("retry started, want a refusal: the trusted settings changed after the proof")
+	}
+	for _, want := range []string{"compatible configuration proof failed", "repository configuration changed", "review", "no-mistakes rerun"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q does not contain %q", err, want)
+		}
+	}
+	f.requireNothingLaunched(t)
+}
+
+// requireNothingLaunched fails when a refused retry left an audit link, a
+// carried step, or an executed step behind.
+func (f *retryFixture) requireNothingLaunched(t *testing.T) {
+	t.Helper()
+	if link, err := f.d.GetRunRetryBySource(f.source.ID); err != nil || link != nil {
+		t.Errorf("run_retries row = %+v (err %v), want none", link, err)
+	}
+	runs, err := f.d.GetRunsByRepo(f.repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, run := range runs {
+		if run.ID == f.source.ID {
+			continue
+		}
+		rows, err := f.d.GetStepsByRun(run.ID)
+		if err != nil || len(rows) != 0 {
+			t.Errorf("refused continuation %s has steps %+v (err %v), want none", run.ID, rows, err)
+		}
+	}
+	if got := f.executions.Load(); got != 0 {
+		t.Errorf("refusal executed %d steps", got)
 	}
 }
