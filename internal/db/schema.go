@@ -233,6 +233,21 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
     created_at    INTEGER NOT NULL,
     PRIMARY KEY (repo_id, branch)
 );
+
+-- One row per run that continues a failed run from its failed step (axi
+-- retry): the audit trail from the original failure to the continuation,
+-- whose own status is the outcome. source_run_id is UNIQUE because a failed
+-- run is continued at most once; it is not a foreign key, so the trail
+-- survives the source run's deletion.
+CREATE TABLE IF NOT EXISTS run_retries (
+    run_id              TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    source_run_id       TEXT NOT NULL UNIQUE,
+    step_name           TEXT NOT NULL,
+    source_round        INTEGER NOT NULL,
+    source_error        TEXT NOT NULL,
+    checkpoint_head_sha TEXT NOT NULL,
+    created_at          INTEGER NOT NULL
+);
 `
 
 // migrationStatements hold additive schema changes applied to databases that
@@ -384,4 +399,13 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN ci_test_restart_pending INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE step_results ADD COLUMN response_origin TEXT NOT NULL DEFAULT 'unknown'`,
 	`ALTER TABLE step_rounds ADD COLUMN response_origin TEXT NOT NULL DEFAULT 'unknown'`,
+	// Why a failed step failed, when the executor could tell. NULL means no
+	// recorded cause, which is every historical row and every failure that is
+	// not an agent invocation's own error; only a recorded cause makes a
+	// failed run eligible for axi retry.
+	`ALTER TABLE step_results ADD COLUMN failure_cause TEXT`,
+	// The source run's step row a retried run carried instead of executing.
+	// The carried row has no rounds of its own; readers that render what the
+	// step did follow this to the source row's rounds.
+	`ALTER TABLE step_results ADD COLUMN carried_from TEXT`,
 }

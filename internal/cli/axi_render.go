@@ -133,6 +133,8 @@ type runView struct {
 	// genuinely green run in agent-facing output.
 	CIOverrideReason   string
 	TestOverrideReason string
+	RetryOf            *ipc.RunRetryInfo
+	RetriedBy          string
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
@@ -148,6 +150,8 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		TestOverrideReason: r.TestOverrideReason,
 		PiProfile:          r.PiProfile,
 		VerificationPlan:   r.VerificationPlan,
+		RetryOf:            r.RetryOf,
+		RetriedBy:          r.RetriedBy,
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -488,6 +492,17 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA})
 	if rv.TestOverrideReason != "" {
 		fields = append(fields, toon.Field{Key: "test_override_reason", Value: rv.TestOverrideReason})
+	}
+	if r := rv.RetryOf; r != nil {
+		fields = append(fields, toon.Field{Key: "retry_of", Value: toon.NewObject(
+			toon.Field{Key: "run", Value: r.RunID},
+			toon.Field{Key: "step", Value: string(r.Step)},
+			toon.Field{Key: "failed_round", Value: r.Round},
+			toon.Field{Key: "checkpoint_head", Value: shortSHA(r.CheckpointHeadSHA)},
+		)})
+	}
+	if rv.RetriedBy != "" {
+		fields = append(fields, toon.Field{Key: "retried_by", Value: rv.RetriedBy})
 	}
 	if p := rv.VerificationPlan; p != nil {
 		fields = append(fields, toon.Field{Key: "verification_plan", Value: toon.NewObject(

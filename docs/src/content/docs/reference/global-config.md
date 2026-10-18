@@ -276,12 +276,15 @@ How each field maps:
 | `grok`            | `--model`                                     | `--reasoning-effort`              | whatever the selected reasoning model accepts       |
 | `copilot`         | `--model`                                     | `--effort`                        | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
 | `pi`              | `--model`                                     | `--thinking`                      | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
-| `opencode`        | session-message `model` (needs `provider/model`) | session-message `variant`      | provider-specific                                   |
+| `opencode`        | session `model` (needs `provider/model`)         | session model `variant`        | provider-specific                                   |
 | `cursor`, `devin`, `acp:*` | `acpx --model`                       | not expressible                   | -                                                   |
 | `rovodev`         | not expressible                               | not expressible                   | -                                                   |
 | `antigravity`     | not expressible                               | not expressible                   | -                                                   |
 
-`opencode` needs the `provider/model` form (for example `openai/gpt-5`) because its session API takes the provider and the model as separate fields; a bare model name is refused at config load rather than dropped. Both of its knobs travel in the session message, not in the launch command, because `opencode serve` exits with usage on an unknown flag.
+`opencode` needs the `provider/model` form (for example `openai/gpt-5`) because its session API takes the provider and the model as separate fields; a bare model name is refused at config load rather than dropped.
+OpenCode 2 receives both knobs in the model reference when the session is created; an effort-only profile resolves the location's default model first.
+OpenCode 1 receives them in the session message.
+Neither version receives model flags in the launch command, because `opencode serve` rejects them.
 
 `rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so `agent_config` for them is a config error rather than a request that quietly does nothing. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface. acpx also accepts only the model ids a target advertises over ACP; for `devin` that is a subset of `devin models list`, and [`acp_registry_overrides`](#acp_registry_overrides) is the escape hatch for the rest.
 
@@ -602,6 +605,26 @@ This is observability only.
 It does not cancel the step, change auto-fix behavior, or mark the run failed.
 AXI renders the quiet signal in the `active_steps` table as part of `last_activity`, for example `quiet 12m3s ago: codex started pid=4242`.
 For older active runs that do not yet have activity rows, AXI falls back to the step log file's modification time.
+
+### agent_crash_retries
+
+Opt-in automatic retries of an agent-crashed Review, Test, Document or Lint step in the **same live run**. Completed steps stay completed. Set `agent_crash_retries: 1` to allow one additional attempt; the default `0` preserves the existing failure behavior.
+
+|         |                  |
+| ------- | ---------------- |
+| Type    | integer          |
+| Range   | `0`–`3`          |
+| Default | `0` (disabled)   |
+
+Agent process exits and agent invocation timeout cuts qualify, never a real finding, test verdict, configured-command failure, Git error, or cancellation. Typed terminal provider signals, including authentication/access-denial errors and quota exhaustion, stay terminal. Adapters that give no typed terminal signal (Pi, Grok) can have an auth or quota failure retried up to `agent_crash_retries` times before failing with the original diagnostic. Existing adapter and analyzer formatting retries run first; exhausted adapter-transient failures and Claude's native structured-output retry exhaustion stay terminal. Each additional attempt must still produce a valid result; a crash is never a pass.
+
+Eligible validation steps also pin their freshly resolved diff base across the live run: a later fetch that changes that base fails before invoking another agent, even if the run's recorded previous-push SHA did not change. A full restart at Review establishes a new base pin.
+
+Before retrying, the executor proves that the run and worktree head SHA, recorded base SHA, effective configuration, completed-step records/rounds and evidence-file hashes still match their pre-attempt snapshot. The worktree must be clean before and after the attempt, including untracked and ignored files. Missing or changed proof refuses the retry and fails normally: no in-run restart is attempted; start a fresh run for full validation from step 1. Partial edits, commits or evidence from a crashed attempt are never silently discarded or certified. The log records the `agent_invocation` retry or proof refusal; an exhausted retry still fails with its agent diagnostic.
+
+A hang cut by the default invocation budget can qualify. A non-default agent timeout, or any still-working cap, disables timeout-based crash retries; the shipped timeout values count as unconfigured even when the generated config writes them explicitly. Process exits can still qualify. Test budget cuts that already park for an operator decision remain parked, not automatically retried.
+
+Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed or retried. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for the remainder of a run resumed after daemon recovery; a later agent crash fails that step normally. It does not continue a terminal run: [`axi retry`](/reference/cli/#axi-retry) is the separate manual continuation, using the shared `agent_invocation` cause and its own checkpoint proofs. Timeout cuts do not acquire that cause, and parser rejections remain terminal. It is global-only: repository config and environment variables cannot enable it.
 
 ### agent_timeout
 
