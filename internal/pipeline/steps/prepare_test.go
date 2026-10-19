@@ -17,6 +17,7 @@ import (
 )
 
 func TestEnsurePrepared_RunsOnceAndKeepsOnlyIgnoredMaterialization(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ignoreTestDependencies(t, dir)
 	sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{Prepare: preparationCommand()})
@@ -52,6 +53,7 @@ func TestEnsurePrepared_RunsOnceAndKeepsOnlyIgnoredMaterialization(t *testing.T)
 }
 
 func TestConfiguredTestAndLintSharePreparation(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ignoreTestDependencies(t, dir)
 	// A configured baseline no longer replaces Test's evidence turn.
@@ -98,6 +100,7 @@ func TestConfiguredTestAndLintSharePreparation(t *testing.T) {
 // submodules start empty and a repository populates them with
 // commands.prepare. Every configured command must see that checkout.
 func TestConfiguredTestAndLintSeeSubmoduleCheckedOutByPreparation(t *testing.T) {
+	t.Parallel()
 	super, baseSHA, _ := setupGitRepo(t)
 	remote := t.TempDir()
 	gitCmd(t, remote, "init", "--bare")
@@ -153,6 +156,7 @@ func TestConfiguredTestAndLintSeeSubmoduleCheckedOutByPreparation(t *testing.T) 
 }
 
 func TestEnsurePrepared_RemovesNestedRepositoryMutation(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ignoreTestDependencies(t, dir)
 	sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{Prepare: nestedRepositoryPreparationCommand()})
@@ -170,6 +174,7 @@ func TestEnsurePrepared_RemovesNestedRepositoryMutation(t *testing.T) {
 }
 
 func TestEnsurePrepared_RestoresPendingTrackedAndUntrackedChanges(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ignoreTestDependencies(t, dir)
 	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("pending staged change\n"), 0o644); err != nil {
@@ -215,6 +220,7 @@ func TestEnsurePrepared_RestoresPendingTrackedAndUntrackedChanges(t *testing.T) 
 }
 
 func TestEnsurePrepared_PreservesSharedStash(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ignoreTestDependencies(t, dir)
 	other := filepath.Join(t.TempDir(), "other")
@@ -244,6 +250,7 @@ func TestEnsurePrepared_PreservesSharedStash(t *testing.T) {
 }
 
 func TestEnsurePrepared_ResetsRegisteredSubmodule(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, _ := setupGitRepo(t)
 	remote := t.TempDir()
 	gitCmd(t, remote, "init", "--bare")
@@ -278,6 +285,25 @@ func TestEnsurePrepared_ResetsRegisteredSubmodule(t *testing.T) {
 }
 
 func TestEnsurePrepared_RestoresDirtyInitializedSubmodule(t *testing.T) {
+	t.Parallel()
+	assertPreparationRestoresDirtyInitializedSubmodule(t)
+}
+
+// User git config must not be able to make the snapshot unrestorable:
+// diff.submodule=log once rendered the dirty submodule as prose, and the
+// restore's git apply failed with "No valid patches in input".
+func TestEnsurePrepared_RestoresDirtySubmoduleUnderHostileDiffConfig(t *testing.T) {
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	hostile := "[diff]\n\tsubmodule = log\n\tnoprefix = true\n\tmnemonicprefix = true\n[color]\n\tui = always\n"
+	if err := os.WriteFile(globalConfig, []byte(hostile), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	assertPreparationRestoresDirtyInitializedSubmodule(t)
+}
+
+func assertPreparationRestoresDirtyInitializedSubmodule(t *testing.T) {
+	t.Helper()
 	dir, baseSHA, _ := setupGitRepo(t)
 	remote := t.TempDir()
 	gitCmd(t, remote, "init", "--bare")
@@ -319,6 +345,7 @@ func TestEnsurePrepared_RestoresDirtyInitializedSubmodule(t *testing.T) {
 }
 
 func TestEnsurePrepared_DoesNotInitializeUnrelatedSubmodule(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, _ := setupGitRepo(t)
 	remote := t.TempDir()
 	gitCmd(t, remote, "init", "--bare")
@@ -351,6 +378,7 @@ func TestEnsurePrepared_DoesNotInitializeUnrelatedSubmodule(t *testing.T) {
 }
 
 func TestEnsurePrepared_KeepsSubmoduleInitializedByPreparationAtRecordedCommit(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, _ := setupGitRepo(t)
 	remote := t.TempDir()
 	gitCmd(t, remote, "init", "--bare")
@@ -393,6 +421,7 @@ func TestEnsurePrepared_KeepsSubmoduleInitializedByPreparationAtRecordedCommit(t
 // commit onto the recorded one instead of checking that commit out, so the
 // configured commands would validate content the head does not record.
 func TestEnsurePrepared_ResetsSubmoduleConfiguredToRebase(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, _ := setupGitRepo(t)
 	remote := t.TempDir()
 	gitCmd(t, remote, "init", "--bare")
@@ -429,6 +458,7 @@ func TestEnsurePrepared_ResetsSubmoduleConfiguredToRebase(t *testing.T) {
 }
 
 func TestEnsurePrepared_RestoresDeletedInitializedSubmodule(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, _ := setupGitRepo(t)
 	remote := t.TempDir()
 	gitCmd(t, remote, "init", "--bare")
@@ -460,6 +490,7 @@ func TestEnsurePrepared_RestoresDeletedInitializedSubmodule(t *testing.T) {
 }
 
 func TestEnsurePrepared_RestoresUntrackedModes(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows does not preserve Unix executable modes")
 	}
@@ -494,6 +525,7 @@ func TestEnsurePrepared_RestoresUntrackedModes(t *testing.T) {
 }
 
 func TestEnsurePrepared_LogsDurationAfterFailure(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{Prepare: failingPreparationCommand()})
 	sctx.Shared = &pipeline.RunShared{}
@@ -562,6 +594,7 @@ func TestEnsurePrepared_IgnoresWorktreeTempDirectory(t *testing.T) {
 }
 
 func TestEnsurePrepared_RestoresEmptyUntrackedDirectories(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	pending := filepath.Join(dir, "pending")
 	nested := filepath.Join(pending, "nested")
@@ -601,6 +634,7 @@ func TestEnsurePrepared_RestoresEmptyUntrackedDirectories(t *testing.T) {
 }
 
 func TestEnsurePrepared_RestoresNestedInitializedSubmodule(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupNestedSubmodules(t)
 	inner := filepath.Join(dir, "outer", "inner")
 	innerHead := gitCmd(t, inner, "rev-parse", "HEAD")
@@ -616,6 +650,7 @@ func TestEnsurePrepared_RestoresNestedInitializedSubmodule(t *testing.T) {
 }
 
 func TestEnsurePrepared_KeepsNestedSubmoduleInitializedByPreparation(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupNestedSubmodules(t)
 	outer := filepath.Join(dir, "outer")
 	gitCmd(t, outer, "submodule", "deinit", "--force", "inner")
@@ -638,6 +673,7 @@ func TestEnsurePrepared_KeepsNestedSubmoduleInitializedByPreparation(t *testing.
 }
 
 func TestEnsurePrepared_RestoresIntentToAdd(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	if err := os.WriteFile(filepath.Join(dir, "intent.go"), []byte("package intent\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -660,6 +696,7 @@ func TestEnsurePrepared_RestoresIntentToAdd(t *testing.T) {
 }
 
 func TestPreparationSnapshot_RetainsRecoveryData(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{})
 	snapshot, err := snapshotPreparationState(sctx.Ctx, dir, sctx.GateDir)
@@ -683,6 +720,7 @@ func TestPreparationSnapshot_RetainsRecoveryData(t *testing.T) {
 }
 
 func TestPreparationSnapshot_RejectsGateInsideWorktree(t *testing.T) {
+	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	sctx := newTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{})
 	gateDir := filepath.Join(dir, "gate")
@@ -693,6 +731,7 @@ func TestPreparationSnapshot_RejectsGateInsideWorktree(t *testing.T) {
 }
 
 func TestPreparationGateInsideWorktree_AcceptsDifferentWindowsVolumes(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "windows" {
 		t.Skip("filepath volumes are Windows-specific")
 	}

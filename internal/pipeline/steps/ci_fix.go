@@ -104,6 +104,16 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	if outcome := s.ciFixAgentBudgetOutcome(sctx, issueDesc, err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}
+	if err != nil && pluginContractBroken(err) {
+		// A provider plugin that broke its contract during the repair (for
+		// example a malformed pr check-logs answer, or a broken status
+		// handshake while attesting the repaired head) would break it the
+		// same way on every retry; fail the step like any other plugin
+		// violation. This precedes the unsettled-attestation park, which
+		// would otherwise present the broken integration as a repair
+		// awaiting approval.
+		return nil, err
+	}
 	if err != nil && errors.Is(err, errCIAttestationUnsettled) {
 		sctx.Log(fmt.Sprintf("CI repair push is not settled: %v", err))
 		return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, err.Error()), nil
@@ -126,7 +136,7 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 			// Carry them on the restart outcome: ask-user findings park before
 			// the restart, while an empty or informational set proceeds.
 			return &pipeline.StepOutcome{
-				RestartFrom: types.StepReview,
+				RestartFrom: repair.restartFrom(),
 				Findings:    sctx.DeferredFindings,
 			}, nil
 		}
@@ -162,6 +172,7 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	ctx := sctx.Ctx
 	failingNames := targets.checkNames()
 	mergeConflict := targets.MergeConflict
+	rebase := mergeConflict || targets.BehindBase
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return ciRepairResult{}, err
 	}
@@ -176,14 +187,17 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	}
 	rebaseBaseSHA := resolveRunDefaultBranchTipSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	promptBaseSHA := baseSHA
-	if mergeConflict {
+	if rebase {
 		promptBaseSHA = rebaseBaseSHA
 	}
 
 	const maxLogBytes = 32 * 1024
 	var logOutput string
 	if host.Capabilities().FailedCheckLogs {
-		logOutput = fetchCILogOutput(ctx, host, pr, sctx.Run.Branch, sctx.Run.HeadSHA, targets.Checks, maxLogBytes)
+		logOutput, err = fetchCILogOutput(ctx, host, pr, sctx.Run.Branch, sctx.Run.HeadSHA, targets.Checks, maxLogBytes)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
 	}
 
 	// Build prompt based on what issues are present
@@ -195,6 +209,9 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 		promptRules = ciFailingCheckFixRules
 	case mergeConflict:
 		promptIntro = "The PR has merge conflicts with the base branch. Rebase onto the base branch and resolve the merge conflicts."
+		promptRules = ciMergeConflictFixRules
+	case targets.BehindBase && len(failingNames) == 0:
+		promptIntro = "The PR has no merge conflicts, but it is behind a base branch that requires branches to be up to date before merging. Rebase onto the base branch, resolving any conflicts the rebase reports."
 		promptRules = ciMergeConflictFixRules
 	case len(failingNames) == 0:
 		promptIntro = "Address the following findings selected at the CI gate of this PR."
@@ -226,7 +243,7 @@ Context:
 		mergeConflict,
 		promptRules,
 	)
-	if mergeConflict {
+	if rebase {
 		prompt += fmt.Sprintf("\n- rebase target commit: %s", rebaseBaseSHA)
 	}
 	if logOutput != "" {
@@ -266,7 +283,11 @@ CI logs:
 	if conclusionErr != nil {
 		sctx.Log(fmt.Sprintf("warning: could not parse CI repair conclusion: %v", conclusionErr))
 	}
-	repair, err := s.commitRepair(sctx, conclusion.Summary)
+	if rebase {
+		s.replayBase = rebaseBaseSHA
+		defer func() { s.replayBase = "" }()
+	}
+	repair, err := s.commitRepair(sctx, conclusion.Summary, result)
 	var refusal *pipeline.ProtectedPathError
 	if errors.As(err, &refusal) {
 		head, recordErr := stepGitHeadSHA(sctx)
@@ -282,16 +303,20 @@ CI logs:
 		repair.Summary = conclusion.Summary
 		return repair, nil
 	}
-	if !mergeConflict && conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
+	if !rebase && conclusion.CodeChangeNeeded != nil && !*conclusion.CodeChangeNeeded {
 		repair.NoCodeChangeNeeded = true
 		repair.Summary = conclusion.Summary
 	}
 	return repair, nil
 }
 
-func fetchCILogOutput(ctx context.Context, host scm.Host, pr *scm.PR, branch, headSHA string, targets []scm.CheckTarget, maxBytes int) string {
+// fetchCILogOutput returns the selected checks' log evidence. A failed
+// retrieval is marked in the evidence and the repair proceeds without it; the
+// only error is a provider plugin's contract violation (pluginPollFailsStep),
+// which fails the step like every other plugin call.
+func fetchCILogOutput(ctx context.Context, host scm.Host, pr *scm.PR, branch, headSHA string, targets []scm.CheckTarget, maxBytes int) (string, error) {
 	if maxBytes <= 0 || len(targets) == 0 {
-		return ""
+		return "", nil
 	}
 	targeted, ok := host.(scm.TargetedFailedCheckLogsHost)
 	if !ok {
@@ -300,10 +325,13 @@ func fetchCILogOutput(ctx context.Context, host scm.Host, pr *scm.PR, branch, he
 			names = append(names, target.Name)
 		}
 		raw, err := host.FetchFailedCheckLogs(ctx, pr, branch, headSHA, names)
+		if err != nil && pluginPollFailsStep(err) {
+			return "", err
+		}
 		if err != nil {
 			slog.Warn("failed to fetch CI logs", "err", err)
 		}
-		return boundedCILogEvidence("Selected CI checks", raw, err, maxBytes)
+		return boundedCILogEvidence("Selected CI checks", raw, err, maxBytes), nil
 	}
 
 	logs, err := targeted.FetchFailedCheckTargetLogs(ctx, pr, branch, headSHA, targets)
@@ -337,7 +365,7 @@ func fetchCILogOutput(ctx context.Context, host scm.Host, pr *scm.PR, branch, he
 		parts = append(parts, part)
 		available -= len(part)
 	}
-	return strings.Join(parts, "\n\n")
+	return strings.Join(parts, "\n\n"), nil
 }
 
 func boundedCILogEvidence(label, raw string, retrievalErr error, maxBytes int) string {
@@ -543,15 +571,26 @@ type ciRepairResult struct {
 	// HeadAdvanced is true when the run's recorded head moved to the repair.
 	HeadAdvanced bool
 	// Revalidate is true when the repair was NOT published and the pipeline
-	// must re-run from Review before Push may publish it.
-	Revalidate         bool
+	// must re-run before Push may publish it.
+	Revalidate bool
+	// ReviewCarried is true when a revalidating repair kept the run's review
+	// approval as a proven pure replay, so revalidation starts at Test.
+	ReviewCarried      bool
 	NoCodeChangeNeeded bool
 	Summary            string
 }
 
+// restartFrom is the step a revalidating repair restarts validation at.
+func (r ciRepairResult) restartFrom() types.StepName {
+	if r.ReviewCarried {
+		return types.StepTest
+	}
+	return types.StepReview
+}
+
 // commitAndPush remains as the narrow test seam for the default summary.
 func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (ciRepairResult, error) {
-	return s.commitRepair(sctx, "")
+	return s.commitRepair(sctx, "", nil)
 }
 
 func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairResult, error) {
@@ -560,7 +599,9 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 	}
 	defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 	sctx.Log("retrying retained CI repair after protected-path refusal")
-	repair, err := s.commitRepair(sctx, "")
+	// The retained changes outlived the invocation that made them, so no
+	// producer is known here and the commit carries no trailers.
+	repair, err := s.commitRepair(sctx, "", nil)
 	if err != nil || repair.HeadAdvanced {
 		return repair, err
 	}
@@ -571,7 +612,7 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 	return s.recordRepair(sctx, head)
 }
 
-func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string) (ciRepairResult, error) {
+func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, producer *agent.Result) (ciRepairResult, error) {
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("check CI changes: %w", err)
@@ -591,6 +632,10 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string) (ciRep
 	message, err := sctx.Config.Commit.RenderFixMessageForBranch(types.StepCI, summary, sctx.Run.Branch)
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("render CI repair commit message: %w", err)
+	}
+	message, err = withCommitTrailers(sctx, message, producer)
+	if err != nil {
+		return ciRepairResult{}, fmt.Errorf("render CI repair commit trailers: %w", err)
 	}
 	if err := stagePipelineChanges(sctx); err != nil {
 		return ciRepairResult{}, fmt.Errorf("stage CI changes: %w", err)
@@ -684,10 +729,68 @@ func (s *CIStep) recordRepair(sctx *pipeline.StepContext, headSHA string) (ciRep
 		return s.recordLocalRepair(sctx, headSHA)
 	}
 	if reason := ciRepairContinuityGap(sctx, headSHA); reason != "" {
+		if s.replayBase != "" && ciCarriesReviewOnReplay(sctx) {
+			repair, carried, err := s.recordReplayedRepair(sctx, headSHA, s.replayBase)
+			if err != nil || carried {
+				return repair, err
+			}
+		}
 		sctx.Log(fmt.Sprintf("cannot prove the repaired head continues the reviewed head: %s; revalidating from Review instead of publishing", reason))
 		return s.recordLocalRepair(sctx, headSHA)
 	}
+	// A head that carried its review approval across a rebase has not been
+	// through Test onward yet, so nothing on it may publish here. The same head
+	// restarts at Test; a new commit on top of it revalidates from Review, as
+	// the rebase would have with the carry off. An unreadable flag fails
+	// closed the same way.
+	if pending, err := sctx.DB.RunTestRestartPending(sctx.Run.ID); err != nil || pending {
+		if err == nil && strings.EqualFold(headSHA, sctx.Run.HeadSHA) {
+			sctx.Log("carried review approval still awaits validation from Test; restarting there instead of publishing")
+			return ciRepairResult{HeadAdvanced: true, Revalidate: true, ReviewCarried: true}, nil
+		}
+		return s.recordLocalRepair(sctx, headSHA)
+	}
 	return s.publishRepair(sctx, headSHA)
+}
+
+// recordReplayedRepair keeps a rebase repair local and moves the run's review
+// approval to it when it is a provable pure replay of the approved commits
+// onto base (see pureReplayGap). The reviewed diff is unchanged, so only the
+// steps that depend on the base - Test onward - re-run. It reports carried =
+// false, having recorded nothing, whenever the proof does not hold, so the
+// caller takes the ordinary revalidation path.
+func (s *CIStep) recordReplayedRepair(sctx *pipeline.StepContext, headSHA, base string) (ciRepairResult, bool, error) {
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		return ciRepairResult{}, false, nil
+	}
+	approvedHead, _ := reviewApprovedHead(sctx, run)
+	if approvedHead == "" {
+		return ciRepairResult{}, false, nil
+	}
+	if gate := reviewAnchoredGate(sctx); gate != "" {
+		sctx.Log(fmt.Sprintf("not carrying the review approval across the rebase: gate %q runs after Review", gate))
+		return ciRepairResult{}, false, nil
+	}
+	if gap := pureReplayGap(sctx, approvedHead, base, headSHA); gap != "" {
+		sctx.Log(fmt.Sprintf("rebase repair is not a pure replay of the reviewed commits: %s", gap))
+		return ciRepairResult{}, false, nil
+	}
+	if err := updateNonSharedBranchRef(sctx, headSHA); err != nil {
+		return ciRepairResult{}, false, err
+	}
+	startingHead := sctx.Run.HeadSHA
+	// Durable first, then in memory, as in recordLocalRepair. The write only
+	// lands while the approval is still the one the proof was made against.
+	carried, err := sctx.DB.UpdateRunHeadSHAWithCarriedReview(sctx.Run.ID, approvedHead, headSHA)
+	if err != nil || !carried {
+		return ciRepairResult{}, false, err
+	}
+	sctx.Run.HeadSHA = headSHA
+	sctx.Run.ReviewApprovedHeadSHA = &headSHA
+	pipeline.RemapUncertifiedPipelineRangeAfterRebase(sctx, startingHead, headSHA)
+	sctx.Log(fmt.Sprintf("rebase repair is a pure replay of reviewed head %s onto %s; carrying the review approval to %s and revalidating from Test", shortObjectID(approvedHead), shortObjectID(base), shortObjectID(headSHA)))
+	return ciRepairResult{HeadAdvanced: true, Revalidate: true, ReviewCarried: true}, true, nil
 }
 
 // ciRepairContinuityGap returns why the repaired head cannot be proven to
@@ -758,7 +861,7 @@ func (s *CIStep) recordLocalRepair(sctx *pipeline.StepContext, headSHA string) (
 func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
 	if err := publishRunHead(sctx, headSHA, headSHA, nil); err != nil {
 		if errors.Is(err, errAttestationWriteFailed) {
-			return ciRepairResult{}, fmt.Errorf("%w at %s: %v", errCIAttestationUnsettled, shortObjectID(headSHA), err)
+			return ciRepairResult{}, fmt.Errorf("%w at %s: %w", errCIAttestationUnsettled, shortObjectID(headSHA), err)
 		}
 		return ciRepairResult{}, err
 	}
@@ -791,8 +894,13 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 // (matches the PR step's own skip semantics); or no PR exists yet for this
 // branch. It never mints an attestation for a PR that was not raised through
 // no-mistakes - restampPRAttestationWithSteps already enforces that. Any
-// other failure (PR discovery errors, or a discoverable PR whose write does
-// not settle) is wrapped in errAttestationWriteFailed and returned.
+// other failure (PR discovery errors, a provider plugin whose status
+// handshake broke its contract - the PR step fails on that too, see
+// pluginContractBroken - or a discoverable PR whose write does not
+// settle) is wrapped in errAttestationWriteFailed and returned, keeping the
+// provider error in the chain so a CI repair can tell a provider plugin
+// contract violation (which fails the step) from an unsettled write (which
+// parks).
 func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*db.StepResult) error {
 	provider := resolvedProvider(sctx)
 	if !supportsPRTemplates(provider) {
@@ -810,6 +918,9 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 		return nil
 	}
 	if err := host.Available(sctx.Ctx); err != nil {
+		if pluginContractBroken(err) {
+			return fmt.Errorf("%w: %w", errAttestationWriteFailed, err)
+		}
 		if sctx.Log != nil {
 			sctx.Log(fmt.Sprintf("skipping attestation write: %v", err))
 		}
@@ -817,17 +928,20 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 	}
 	discovered, err := host.FindPR(sctx.Ctx, branch, "")
 	if err != nil {
-		return fmt.Errorf("%w: find pull request: %v", errAttestationWriteFailed, err)
+		return fmt.Errorf("%w: find pull request: %w", errAttestationWriteFailed, err)
 	}
 	pr, err := bindExistingPR(sctx, host, discovered)
 	if err != nil {
-		return fmt.Errorf("%w: resolve pull request: %v", errAttestationWriteFailed, err)
+		return fmt.Errorf("%w: resolve pull request: %w", errAttestationWriteFailed, err)
 	}
 	if pr == nil {
+		if sctx.Log != nil {
+			sctx.Log("skipping attestation write: no pull request found for this branch")
+		}
 		return nil
 	}
 	if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, steps, sctx.Log, attestationPolicyFrom(sctx)); err != nil {
-		return fmt.Errorf("%w: %v", errAttestationWriteFailed, err)
+		return fmt.Errorf("%w: %w", errAttestationWriteFailed, err)
 	}
 	return nil
 }
@@ -876,11 +990,17 @@ func restampPRAttestationWithSteps(ctx context.Context, host scm.Host, pr *scm.P
 			// Azure's adapter clamps ordinary descriptions. Owned writes must
 			// fail before that boundary can cut off author text or the digest.
 			if rebound && hasPRAppendixMarkers(updated) {
-				if err := validateOwnedPRBudget(updated, scm.MaxPRBodyChars(host.Provider())); err != nil {
+				if err := validateOwnedPRBudget(updated, scm.HostMaxPRBodyChars(host)); err != nil {
 					return err
 				}
 			}
-			if !rebound || updated == content.Body {
+			if !rebound {
+				if logfn != nil {
+					logfn("skipping attestation rebind: pull request body carries no attestation marker")
+				}
+				return nil
+			}
+			if updated == content.Body {
 				return nil
 			}
 
