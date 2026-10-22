@@ -833,6 +833,71 @@ func TestClaudeAgent_NonzeroExitAfterUsableResultFinalizesIt(t *testing.T) {
 	}
 }
 
+func TestClaudeAgent_NonzeroExitAfterTextResultIsAcceptedAndNoted(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-then-fail")
+	a := newClaudeStdinHelperAgent(t)
+
+	var chunks []string
+	res, err := a.Run(context.Background(), RunOpts{
+		Prompt:  "review",
+		CWD:     t.TempDir(),
+		OnChunk: func(s string) { chunks = append(chunks, s) },
+	})
+	if err != nil {
+		t.Fatalf("Run = %v, want the finished text result despite the nonzero exit", err)
+	}
+	if res.Text != "ok" {
+		t.Errorf("Text = %q, want ok", res.Text)
+	}
+	if !strings.Contains(strings.Join(chunks, "\n"), "claude exited after completing its result: exit status 1") {
+		t.Errorf("chunks = %q, want the exit note", chunks)
+	}
+}
+
+func TestClaudeAgent_NonzeroExitAfterResultMissingStructuredOutputFails(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "unstructured-result-then-fail")
+	a := newClaudeStdinHelperAgent(t)
+
+	_, err := a.runOnce(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        t.TempDir(),
+		JSONSchema: json.RawMessage(`{"type":"object"}`),
+	})
+	if err == nil || !strings.Contains(err.Error(), "claude exited: exit status 1") {
+		t.Fatalf("err = %v, want the exit error", err)
+	}
+}
+
+func TestClaudeStdoutTail(t *testing.T) {
+	long := strings.Repeat("x", 5000)
+	for _, tc := range []struct {
+		name   string
+		writes []string
+		want   string
+	}{
+		{name: "split writes", writes: []string{"usage li", "mit reached\n"}, want: "stdout: usage limit reached"},
+		{name: "final line without newline", writes: []string{"first\nlast words"}, want: "stdout: first | last words"},
+		{name: "event lines filtered", writes: []string{"{\"type\":\"assistant\"}\nbanner\n{\"type\":\"result\"}\n"}, want: "stdout: banner"},
+		{name: "three line limit", writes: []string{"a\nb\nc\nd\n"}, want: "stdout: b | c | d"},
+		{name: "long line is truncated", writes: []string{long + "\nafter\n"}, want: "stdout: " + strings.Repeat("x", claudeStdoutTailLineRune) + "... | after"},
+		{name: "long line spanning writes is truncated once", writes: []string{long, long, "\nafter\n"}, want: "stdout: " + strings.Repeat("x", claudeStdoutTailLineRune) + "... | after"},
+		{name: "long unterminated line", writes: []string{long}, want: "stdout: " + strings.Repeat("x", claudeStdoutTailLineRune) + "..."},
+		{name: "nothing", writes: []string{"\n  \n"}, want: claudeNoOutputEvidence},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var tail claudeStdoutTail
+			for _, w := range tc.writes {
+				if _, err := tail.Write([]byte(w)); err != nil {
+					t.Fatalf("Write: %v", err)
+				}
+			}
+			if got := tail.evidence(nil); got != tc.want {
+				t.Errorf("evidence = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClaudeAgent_NonzeroExitStillFailsWhenNativeChildrenMustComplete(t *testing.T) {
 	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-then-fail")
 	a := newClaudeStdinHelperAgent(t)
@@ -931,6 +996,9 @@ func TestClaudeStdinHelper(t *testing.T) {
 		os.Exit(1)
 	case "result-then-fail":
 		emitClaudeHelperResult()
+		os.Exit(1)
+	case "unstructured-result-then-fail":
+		_, _ = io.WriteString(os.Stdout, `{"type":"result","subtype":"success","session_id":"helper-session"}`+"\n")
 		os.Exit(1)
 	case "read":
 		prompt, err := io.ReadAll(os.Stdin)
