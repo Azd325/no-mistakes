@@ -563,29 +563,29 @@ func TestClaudeRetryClassifier_ReportedAPIErrorDecidesAlone(t *testing.T) {
 	}{
 		{
 			name:      "transient status",
-			err:       claudeExitError(exit, "", &claudeAPIError{Status: 503, Message: "API Error: 503"}),
+			err:       claudeExitError(exit, "", &claudeAPIError{Status: 503, Message: "API Error: 503"}, ""),
 			wantLabel: "http 503",
 			wantRetry: true,
 		},
 		{
 			name: "exhausted quota behind a transient status",
-			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: "API Error: 429 You exceeded your current quota"}),
+			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: "API Error: 429 You exceeded your current quota"}, ""),
 		},
 		{
 			name: "exhausted quota behind the displayed message cut",
-			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: strings.Repeat("x", claudeAPIErrorMessageMaxRunes+50) + " quota exceeded"}),
+			err:  claudeExitError(exit, "", &claudeAPIError{Status: 429, Message: strings.Repeat("x", claudeAPIErrorMessageMaxRunes+50) + " quota exceeded"}, ""),
 		},
 		{
 			name: "permanent status beside transient-looking stderr",
-			err:  claudeExitError(exit, "upstream proxy returned 503", &claudeAPIError{Status: 400, Message: "API Error: 400"}),
+			err:  claudeExitError(exit, "upstream proxy returned 503", &claudeAPIError{Status: 400, Message: "API Error: 400"}, ""),
 		},
 		{
 			name: "cancelled invocation",
-			err:  claudeExitError(context.Canceled, "", &claudeAPIError{Status: 529, Message: "API Error: 529"}),
+			err:  claudeExitError(context.Canceled, "", &claudeAPIError{Status: 529, Message: "API Error: 529"}, ""),
 		},
 		{
 			name:      "stderr alone",
-			err:       claudeExitError(exit, "HTTP 529 from api.anthropic.com", nil),
+			err:       claudeExitError(exit, "HTTP 529 from api.anthropic.com", nil, ""),
 			wantLabel: "http 529",
 			wantRetry: true,
 		},

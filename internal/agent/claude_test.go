@@ -731,6 +731,7 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		fixture      string
+		banner       string
 		wantAttempts int
 		wantErr      string
 	}{
@@ -750,13 +751,13 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 			name:         "recovered 529 then max turns",
 			fixture:      "claude_recovered_529_max_turns.jsonl",
 			wantAttempts: 1,
-			wantErr:      "claude exited: exit status 1: ",
+			wantErr:      "claude exited: exit status 1: result subtype=error_max_turns",
 		},
 		{
 			name:         "prose quoting 429 then max turns",
 			fixture:      "claude_prose_429_max_turns.jsonl",
 			wantAttempts: 1,
-			wantErr:      "claude exited: exit status 1: ",
+			wantErr:      "claude exited: exit status 1: result subtype=error_max_turns",
 		},
 		{
 			name:         "usage limit",
@@ -773,7 +774,13 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 		{
 			name:         "empty stdout and stderr",
 			wantAttempts: 1,
-			wantErr:      "claude exited: exit status 1: ",
+			wantErr:      "claude exited: exit status 1: no stderr or stdout output",
+		},
+		{
+			name:         "plain-text banner on stdout",
+			banner:       "\n  \nYou've hit your weekly limit \u00b7 resets Jul 9 at 9pm (America/Chicago)\n",
+			wantAttempts: 1,
+			wantErr:      "claude exited: exit status 1: stdout: You've hit your weekly limit \u00b7 resets Jul 9 at 9pm (America/Chicago)",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -787,6 +794,7 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 			}
 			t.Setenv("NM_CLAUDE_STDIN_HELPER", "replay-then-fail")
 			t.Setenv("NM_CLAUDE_STDIN_FIXTURE", fixture)
+			t.Setenv("NM_CLAUDE_STDIN_BANNER", tc.banner)
 			a := newClaudeStdinHelperAgent(t)
 
 			attempts := 0
@@ -803,6 +811,66 @@ func TestClaudeAgent_RetriesOnlyATerminalTransientAPIError(t *testing.T) {
 			}
 			if err.Error() != tc.wantErr {
 				t.Errorf("error = %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestClaudeAgent_NonzeroExitAfterUsableResultFinalizesIt(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-then-fail")
+	a := newClaudeStdinHelperAgent(t)
+
+	res, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        t.TempDir(),
+		JSONSchema: json.RawMessage(`{"type":"object","required":["ok"]}`),
+	})
+	if err != nil {
+		t.Fatalf("Run = %v, want the finished result despite the nonzero exit", err)
+	}
+	if string(res.Output) != `{"ok":true}` {
+		t.Errorf("Output = %s, want {\"ok\":true}", res.Output)
+	}
+}
+
+func TestClaudeAgent_NonzeroExitStillFailsWhenNativeChildrenMustComplete(t *testing.T) {
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "result-then-fail")
+	a := newClaudeStdinHelperAgent(t)
+
+	_, err := a.runOnce(context.Background(), RunOpts{
+		Prompt:                   "test",
+		CWD:                      t.TempDir(),
+		JSONSchema:               json.RawMessage(`{"type":"object","required":["ok"]}`),
+		RequireCompletedChildren: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "claude exited: exit status 1") {
+		t.Fatalf("err = %v, want the exit error", err)
+	}
+}
+
+func TestClaudeAgent_NonzeroExitWithoutUsableResultStillFails(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture string
+	}{
+		{name: "no output"},
+		{name: "error result", fixture: "claude_prose_429_max_turns.jsonl"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := ""
+			if tc.fixture != "" {
+				fixture, _ = filepath.Abs(filepath.Join("testdata", tc.fixture))
+			}
+			t.Setenv("NM_CLAUDE_STDIN_HELPER", "replay-then-fail")
+			t.Setenv("NM_CLAUDE_STDIN_FIXTURE", fixture)
+			a := newClaudeStdinHelperAgent(t)
+			_, err := a.runOnce(context.Background(), RunOpts{
+				Prompt:     "review",
+				CWD:        t.TempDir(),
+				JSONSchema: json.RawMessage(`{"type":"object"}`),
+			})
+			if err == nil || !strings.Contains(err.Error(), "claude exited: exit status 1") {
+				t.Fatalf("err = %v, want the exit error", err)
 			}
 		})
 	}
@@ -859,6 +927,10 @@ func TestClaudeStdinHelper(t *testing.T) {
 			}
 			_, _ = os.Stdout.Write(stream)
 		}
+		_, _ = io.WriteString(os.Stdout, os.Getenv("NM_CLAUDE_STDIN_BANNER"))
+		os.Exit(1)
+	case "result-then-fail":
+		emitClaudeHelperResult()
 		os.Exit(1)
 	case "read":
 		prompt, err := io.ReadAll(os.Stdin)
