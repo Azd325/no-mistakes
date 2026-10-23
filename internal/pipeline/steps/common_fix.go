@@ -72,6 +72,25 @@ func fixerPrompt(prompt string) string {
 	return prompt + fixerRemovalRule + agent.MemoryFilesRule
 }
 
+const (
+	commitSubjectLimit      = 72
+	minFixSummaryBudget     = 20
+	fixSummaryBudgetProbe   = "x"
+	fixSummaryRuleTemplate  = "- The summary must be one concise sentence fragment suitable for a git commit subject.\n- Keep the summary under 10 words and at most %d characters: the commit subject adds a prefix and must stay within %d characters."
+	fixSummaryRuleUnbounded = "- The summary must be one concise sentence fragment suitable for a git commit subject.\n- Keep the summary under 10 words."
+)
+
+// fixSummaryRules renders the summary rules of a fix prompt, including the
+// character budget the configured commit.fix_message leaves for the summary.
+func fixSummaryRules(sctx *pipeline.StepContext, stepName types.StepName) string {
+	rendered, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, fixSummaryBudgetProbe, sctx.Run.Branch)
+	if err != nil {
+		return fixSummaryRuleUnbounded
+	}
+	budget := commitSubjectLimit - (utf8.RuneCountInString(rendered) - len(fixSummaryBudgetProbe))
+	return fmt.Sprintf(fixSummaryRuleTemplate, max(budget, minFixSummaryBudget), commitSubjectLimit)
+}
+
 var commitSummarySchema = json.RawMessage(fmt.Sprintf(`{
 	"type": "object",
 	"properties": {

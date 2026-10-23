@@ -158,8 +158,7 @@ Rules:
 - Do NOT run the complete repository test suite or lint suite during this fix round. The pipeline has dedicated test and lint steps after review that are the authoritative test and lint gates; their coverage may itself be focused on the changed area when the repository has no configured test or lint commands.
 - If the tool needed for that verification is missing, still apply every fix you intended and skip the unavailable verification. Never make fewer edits, or none, because verification is unavailable.
 - Return JSON with a "summary" field when you are done. Add a "verification_blocked" field, naming the missing tool and why verification could not run, only when the verification you intended could not run; otherwise omit it.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s
+%s%s
 
 Previous review findings to address:
 %s`,
@@ -169,6 +168,7 @@ Previous review findings to address:
 			reviewScope,
 			baseBranch,
 			ignorePatterns,
+			fixSummaryRules(sctx, types.StepReview),
 			historySection,
 			previousFindings,
 		)
