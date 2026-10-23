@@ -87,7 +87,16 @@ func fixSummaryRules(sctx *pipeline.StepContext, stepName types.StepName) string
 	if err != nil {
 		return fixSummaryRuleUnbounded
 	}
-	budget := commitSubjectLimit - (utf8.RuneCountInString(rendered) - len(fixSummaryBudgetProbe))
+	doubled, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, fixSummaryBudgetProbe+fixSummaryBudgetProbe, sctx.Run.Branch)
+	if err != nil {
+		return fixSummaryRuleUnbounded
+	}
+	occurrences := utf8.RuneCountInString(doubled) - utf8.RuneCountInString(rendered)
+	if occurrences < 1 {
+		return fixSummaryRuleUnbounded
+	}
+	fixed := utf8.RuneCountInString(rendered) - occurrences*len(fixSummaryBudgetProbe)
+	budget := (commitSubjectLimit - fixed) / occurrences
 	return fmt.Sprintf(fixSummaryRuleTemplate, max(budget, minFixSummaryBudget), commitSubjectLimit)
 }
 

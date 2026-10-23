@@ -36,6 +36,7 @@ func TestFixSummaryRules_BudgetFollowsRenderedPrefix(t *testing.T) {
 		{"custom template", "fix({{.Step}}): {{.Summary}}", types.StepReview, 59},
 		{"summary only", "{{.Summary}}", types.StepReview, 72},
 		{"text after summary", "{{.Summary}} [{{.Step}}]", types.StepReview, 72 - len(" [review]")},
+		{"summary repeated", "{{.Summary}}{{.Summary}}", types.StepReview, 36},
 		{"prefix longer than the limit hits the floor", strings.Repeat("p", 70) + "{{.Summary}}", types.StepReview, minFixSummaryBudget},
 	}
 	for _, tt := range tests {
