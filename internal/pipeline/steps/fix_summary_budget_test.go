@@ -68,21 +68,26 @@ func TestFixSummaryRules_UnrenderableTemplateKeepsWordLimitOnly(t *testing.T) {
 func TestFixPrompts_TellEachStepItsSummaryBudget(t *testing.T) {
 	t.Parallel()
 	gate := config.Gate{Name: "mutation-budget", After: types.StepTest, Command: "exit 0"}
-	gateStep := types.StepName(gate.StepName())
 	steps := []struct {
-		name string
-		step pipeline.Step
-		cmds config.Commands
+		name          string
+		step          pipeline.Step
+		cmds          config.Commands
+		defaultBudget int
+		customBudget  int
 	}{
-		{"review", &ReviewStep{}, config.Commands{}},
-		{"test", &TestStep{}, config.Commands{Test: "exit 0"}},
-		{"lint", &LintStep{}, config.Commands{Lint: "exit 0"}},
-		{"lint agent pass", &LintStep{}, config.Commands{}},
-		{"document", &DocumentStep{}, config.Commands{}},
-		{"custom gate", &CustomGateStep{Gate: gate}, config.Commands{}},
+		{"review", &ReviewStep{}, config.Commands{}, 51, 59},
+		{"test", &TestStep{}, config.Commands{Test: "exit 0"}, 53, 72 - len("fix(test): ")},
+		{"lint", &LintStep{}, config.Commands{Lint: "exit 0"}, 53, 72 - len("fix(lint): ")},
+		{"lint agent pass", &LintStep{}, config.Commands{}, 53, 72 - len("fix(lint): ")},
+		{"document", &DocumentStep{}, config.Commands{}, 49, 72 - len("fix(document): ")},
+		{"custom gate", &CustomGateStep{Gate: gate}, config.Commands{}, 72 - len("no-mistakes(gate.test.mutation-budget): "), 72 - len("fix(gate.test.mutation-budget): ")},
 	}
 	for _, tt := range steps {
 		for _, template := range []string{"", "fix({{.Step}}): {{.Summary}}"} {
+			wantBudget := tt.defaultBudget
+			if template != "" {
+				wantBudget = tt.customBudget
+			}
 			t.Run(fmt.Sprintf("%s/%q", tt.name, template), func(t *testing.T) {
 				t.Parallel()
 				dir, baseSHA, headSHA := setupGitRepo(t)
@@ -101,15 +106,7 @@ func TestFixPrompts_TellEachStepItsSummaryBudget(t *testing.T) {
 				if len(ag.calls) == 0 {
 					t.Fatal("agent was never called")
 				}
-				stepName := tt.step.Name()
-				if stepName == "" {
-					stepName = gateStep
-				}
-				rendered, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, "x", sctx.Run.Branch)
-				if err != nil {
-					t.Fatal(err)
-				}
-				want := budgetRule(72 - (len(rendered) - 1))
+				want := budgetRule(wantBudget)
 				if prompt := ag.calls[0].Prompt; !strings.Contains(prompt, want) {
 					t.Errorf("fix prompt missing %q:\n%s", want, prompt)
 				}
