@@ -431,7 +431,7 @@ func runHumanAdoptPushedHead(cmd *cobra.Command, yes bool) error {
 	state := service.AdoptPushedHead(cmd.Context())
 	observed = state
 	printHumanSyncState(cmd, state)
-	if state.Changed {
+	if pushedHeadAdopted(state) {
 		result = "applied"
 		return nil
 	}
@@ -583,8 +583,11 @@ func runAxiSync(cmd *cobra.Command, check, recover, keepLocal, adoptPublished, a
 	if bindArchiveRef != "" {
 		successful = verifiedArchiveRecovery(state)
 	}
-	if adoptPublished || adoptPushedHead {
+	if adoptPublished {
 		successful = state.Changed
+	}
+	if adoptPushedHead {
+		successful = pushedHeadAdopted(state)
 	}
 	if successful {
 		if state.Changed {
@@ -596,6 +599,10 @@ func runAxiSync(cmd *cobra.Command, check, recover, keepLocal, adoptPublished, a
 	}
 	result = "refused"
 	return &exitError{code: 1}
+}
+
+func pushedHeadAdopted(state branchsync.State) bool {
+	return state.Changed && state.State == branchsync.StateSynchronized && state.Local.Clean && !strings.HasPrefix(state.Safety, "blocked_")
 }
 
 func verifiedArchiveRecovery(state branchsync.State) bool {
