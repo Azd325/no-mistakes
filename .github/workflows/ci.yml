@@ -55,11 +55,11 @@ jobs:
           - os: windows-latest
             name: test (windows-steps-1)
             shard: steps
-            steps_run: '^Test[A-D]'
+            steps_run: '^Test[A-K]'
           - os: windows-latest
             name: test (windows-steps-2)
             shard: steps
-            steps_run: '^Test[E-Q]'
+            steps_run: '^Test[L-Q]'
           - os: windows-latest
             name: test (windows-steps-3)
             shard: steps
