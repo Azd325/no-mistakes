@@ -495,6 +495,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		if ctx.Err() != nil {
 			return e.failRun(run, repo, context.Cause(ctx))
 		}
+		if err := e.validateSkippedReview(run, repo); err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
 
 		sr := stepRecords[step.Name()]
 		if e.skips[step.Name()] {
@@ -707,6 +710,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	gate, err := e.recoveredGate(run.ID)
 	if err != nil {
 		return err
+	}
+	if err := e.validateSkippedReview(run, repo); err != nil {
+		return e.failRun(run, repo, err, ctx)
 	}
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -1053,6 +1059,9 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 	for index := start; index < len(e.steps); index++ {
 		if ctx.Err() != nil {
 			return e.failRun(run, repo, context.Cause(ctx), ctx)
+		}
+		if err := e.validateSkippedReview(run, repo); err != nil {
+			return e.failRun(run, repo, err, ctx)
 		}
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || (!revalidating && results[index].Status != types.StepStatusPending && results[index].Status != types.StepStatusSkipped) {
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)

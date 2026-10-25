@@ -287,6 +287,7 @@ Pushes the validated branch to the configured push target.
 A remote branch can move without being rejected when all remote commits are already represented in the validated head, or when a run is intentionally rewriting history it already knew about.
 Any other out-of-band commit stops the push instead of being overwritten.
 Pre-skipping or later skipping Review leaves no approval binding, so Push fails closed unless Push is also skipped.
+With Push skipped, Test, Document, Lint, and PR can still run.
 
 This step never requires approval - it runs automatically after review, test, document, and lint pass.
 
