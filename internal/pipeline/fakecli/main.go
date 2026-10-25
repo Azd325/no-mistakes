@@ -739,6 +739,15 @@ func fakeCIGHHandler(args []string) {
 		fmt.Println(checksJSON)
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "api") && strings.Contains(joined, "/check-runs") {
+		if payload := os.Getenv("FAKE_CLI_EXTERNAL_REVIEWS"); payload != "" {
+			fmt.Println(payload)
+			os.Exit(0)
+		}
+		fmt.Fprintln(os.Stderr, "unexpected external review read")
+		os.Exit(1)
+	}
+
 	if strings.Contains(joined, "api") && strings.Contains(joined, "graphql") {
 		if strings.Contains(joined, "reviewThreads") {
 			printFakeReviewThreads(os.Getenv("FAKE_CLI_REVIEW_COMMENTS"))
@@ -1264,6 +1273,7 @@ func printFakeWorkflowRuns() {
 
 func printFakeCommitChecks(raw string, args []string) {
 	var checks []struct {
+		ID          int64  `json:"id"`
 		Name        string `json:"name"`
 		State       string `json:"state"`
 		Status      string `json:"status"`
@@ -1273,7 +1283,8 @@ func printFakeCommitChecks(raw string, args []string) {
 		Link        string `json:"link"`
 		// App is the check suite's app slug, rendered the way GitHub's
 		// GraphQL rollup reports it (checkSuite.app.slug). Empty omits it.
-		App string `json:"app"`
+		App   string `json:"app"`
+		AppID int64  `json:"app_id"`
 	}
 	if err := json.Unmarshal([]byte(raw), &checks); err != nil {
 		fmt.Println(raw)
@@ -1310,11 +1321,11 @@ func printFakeCommitChecks(raw string, args []string) {
 			link = strings.Replace(link, "github.com/test/repo/", "github.com/"+repo+"/", 1)
 		}
 		node := map[string]any{
-			"__typename": "CheckRun", "name": check.Name, "status": status,
+			"__typename": "CheckRun", "databaseId": check.ID, "name": check.Name, "status": status,
 			"conclusion": conclusion, "completedAt": check.CompletedAt, "detailsUrl": link,
 		}
 		if check.App != "" {
-			node["checkSuite"] = map[string]any{"app": map[string]any{"slug": check.App}}
+			node["checkSuite"] = map[string]any{"app": map[string]any{"slug": check.App, "databaseId": check.AppID}}
 		}
 		nodes = append(nodes, node)
 	}
@@ -1346,10 +1357,11 @@ func printFakeCommitChecks(raw string, args []string) {
 // comment. An empty or invalid value renders a pull request with no threads.
 func printFakeReviewThreads(raw string) {
 	var comments []struct {
-		Author string `json:"author"`
-		Path   string `json:"path"`
-		Line   int    `json:"line"`
-		Body   string `json:"body"`
+		Author   string `json:"author"`
+		AuthorID int64  `json:"author_id"`
+		Path     string `json:"path"`
+		Line     int    `json:"line"`
+		Body     string `json:"body"`
 	}
 	if raw != "" {
 		if err := json.Unmarshal([]byte(raw), &comments); err != nil {
@@ -1369,7 +1381,7 @@ func printFakeReviewThreads(raw string) {
 					"line":       comment.Line,
 					"url":        fmt.Sprintf("https://github.com/test/repo/pull/42#discussion_r%d", i+1),
 					"createdAt":  "2026-09-07T00:00:00Z",
-					"author":     map[string]any{"login": comment.Author},
+					"author":     map[string]any{"login": comment.Author, "databaseId": comment.AuthorID},
 				}},
 			},
 		})

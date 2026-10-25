@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -161,6 +162,9 @@ const (
 
 // Check is a single CI check result on a PR.
 type Check struct {
+	// ExternalReview is set only by the local required-review gate, never forge prose.
+	ExternalReview string
+
 	Name       string
 	ProviderID string `json:"provider_id,omitempty"`
 	Bucket     CheckBucket
@@ -218,6 +222,10 @@ type Check struct {
 	// so the CI step can tell a third-party review bot's verdict from the
 	// repository's own CI without matching names. Empty when unknown.
 	App string
+	// AppID is the immutable publisher identity on this forge, when available.
+	AppID   int64
+	AppHost string
+	HeadSHA string
 }
 
 // Failing reports whether the check is in a failed bucket.
@@ -229,6 +237,14 @@ func (c Check) Failing() bool { return c.Bucket == CheckBucketFail }
 // review comments, instead of spending an auto-fix round on it, and the
 // GitHub backend collects only these bots' review-thread comments.
 type ReviewBot struct {
+	// AppID and AuthorID pin the GitHub.com identities when nonzero. Legacy
+	// providers keep their existing slug/login matching contract.
+	AppID    int64
+	AuthorID int64
+	// RequiredReview names the ci.required_reviews entry an opt-in bot needs;
+	// without it such a bot is never recognized.
+	RequiredReview string
+
 	// AppSlug is the provider app slug the bot publishes its check under.
 	AppSlug string
 	// Logins are the account logins the bot posts review comments as.
@@ -236,23 +252,40 @@ type ReviewBot struct {
 	GitLabLogins []string
 }
 
+// Immutable GitHub.com identities from GET /apps/coderabbitai and
+// GET /users/coderabbitai[bot]. Other GitHub hosts have independent identities.
+const CodeRabbitAppID int64 = 347564
+const CodeRabbitAuthorID int64 = 136622811
+
 // ReviewBots is the registry of supported review bots. Both halves of the
 // integration - check identity and comment authorship - read it, so adding a
 // bot is one entry here.
 var ReviewBots = []ReviewBot{
 	{AppSlug: "greptile-apps", Logins: []string{"greptile-apps[bot]", "greptile-apps"}, GitLabLogins: []string{"greptileai"}},
+	{AppSlug: "coderabbitai", RequiredReview: "coderabbit", AppID: CodeRabbitAppID, AuthorID: CodeRabbitAuthorID, Logins: []string{"coderabbitai", "coderabbitai[bot]"}},
 }
 
-// ReviewBotForApp returns the registered review bot that publishes checks
-// under slug. An empty slug never matches: a provider that reported no app
-// identity has not identified a bot.
-func ReviewBotForApp(slug string) (ReviewBot, bool) {
-	slug = strings.ToLower(strings.TrimSpace(slug))
-	if slug == "" {
-		return ReviewBot{}, false
-	}
+// ReviewBotsFor returns the registered bots a run recognizes: every bot that
+// needs no opt-in, plus each opt-in bot that requiredReviews names.
+func ReviewBotsFor(requiredReviews []string) []ReviewBot {
+	var bots []ReviewBot
 	for _, bot := range ReviewBots {
-		if strings.EqualFold(bot.AppSlug, slug) {
+		if bot.RequiredReview == "" || slices.Contains(requiredReviews, bot.RequiredReview) {
+			bots = append(bots, bot)
+		}
+	}
+	return bots
+}
+
+// ReviewBotForCheck authenticates the check publisher among bots. CodeRabbit
+// requires its immutable GitHub.com app identity; Greptile retains slug matching.
+func ReviewBotForCheck(bots []ReviewBot, check Check) (ReviewBot, bool) {
+	for _, bot := range bots {
+		if bot.AppID != 0 {
+			if check.AppHost == "github.com" && check.AppID == bot.AppID {
+				return bot, true
+			}
+		} else if check.App != "" && strings.EqualFold(strings.TrimSpace(check.App), bot.AppSlug) {
 			return bot, true
 		}
 	}
@@ -362,6 +395,8 @@ func CombineFailedCheckLogs(logs []FailedCheckLog) (string, error) {
 }
 
 type ReviewComment struct {
+	AuthorID int64
+
 	ID        string
 	Author    string
 	Path      string

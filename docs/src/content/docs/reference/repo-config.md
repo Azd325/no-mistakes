@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `review.agent_timeout`, `gates`, `auto_fix.gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `ci.release_after_checks_pass`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `review.agent_timeout`, `gates`, `auto_fix.gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.required_reviews`, `ci.review_bot_comments`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `ci.release_after_checks_pass`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -88,6 +88,7 @@ ci:
   review_bot_comments: on_failure # or: always
   rebase_behind: false
   carry_review_on_replay: false
+  required_reviews: [] # opt in with: [coderabbit]
 
 # How a base branch that moved under your branch is integrated.
 # Read only from the trusted default branch.
@@ -774,6 +775,55 @@ Reruns are skipped when:
 - The check's details link names nothing the provider can re-run, for example a third-party status pointing at an external dashboard, or a link under a workflow run that names no job the API accepts. A link naming one job re-runs that job; a cancelled check naming only the workflow run re-runs the whole workflow, while other run-only links re-run failed jobs; an unrecognized link is widened into neither.
 - The published branch head no longer equals the commit the run delivered. That case terminates with the expected and observed commits instead: re-running checks against a different head would certify a revision this run never produced. See [pipeline steps: CI](/no-mistakes/reference/pipeline-steps/#ci).
 
+### ci.required_reviews
+
+An optional list of external reviewers that must finish before the CI monitor reports `checks-passed`.
+The default is `[]`; the only supported reviewer profile is `coderabbit` on GitHub.com.
+Enable it in the trusted default branch's `.no-mistakes.yaml`:
+
+```yaml
+ci:
+  required_reviews: [coderabbit]
+```
+
+The whole `ci` block is trusted-only, even with `allow_repo_commands: true`.
+A pushed branch cannot disable the requirement or enable it for itself.
+A repository value overrides the operator's global list; an explicit `[]` disables the requirement, while omission inherits the global value.
+Unknown or duplicate reviewer names fail configuration loading.
+
+CodeRabbit must already be installed for the repository by its administrator.
+no-mistakes uses the existing GitHub CLI authentication for read-only observation and adds no CodeRabbit credentials or installation flow.
+When the list is empty, no additional completion checks are made.
+Existing CI and Greptile behavior stays unchanged. CodeRabbit is recognized as a review bot only when this list names `coderabbit`: otherwise an installed CodeRabbit's check is an ordinary CI check and its review-thread comments are never findings, exactly as if no-mistakes had no CodeRabbit support. Once opted in, failed CodeRabbit checks use the same review-bot findings path as Greptile.
+
+Completion requires the latest `CodeRabbit` check run from GitHub.com app ID `347564`, a nonempty immutable check-run ID, `status: completed`, `conclusion: success`, and a `head_sha` matching the exact current PR head.
+The adapter pins the check query to that SHA and verifies the live PR head before and after discovery.
+Names, slugs, formal approvals, and review/comment bodies cannot establish completion.
+Unresolved CodeRabbit review-thread comments from the verified GitHub bot account become bounded `ask-user` findings in the existing review model, even when the required completion check succeeded.
+Every page of review threads and of each unresolved thread's comments is read; a response that cannot prove it is complete (missing comment nodes, an invalid page cursor, or an unreadable later page) leaves the review unverified rather than clean.
+Their bodies are untrusted evidence and cannot instruct the fix agent; the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns that shared handling.
+GitHub's [check runs API](https://docs.github.com/en/rest/checks/runs#list-check-runs-for-a-git-reference) owns the check fields; CodeRabbit documents its [GitHub check](https://docs.coderabbit.ai/platforms/github-com).
+
+Missing and in-progress reviews keep readiness false and wait under the existing `ci_timeout` policy.
+Skipped, stale, neutral, failed, cancelled, timed-out, unknown terminal outcomes, and rate-limited reviews remain incomplete and produce `ask-user` findings without spending an automatic repair round.
+Unreadable, malformed, partial, or mismatched evidence cannot make the monitor ready.
+`no_ci: true` does not waive an external-review requirement.
+Approval is refused while any required review is incomplete, has unresolved findings, or cannot be verified at the current PR head (including a transient provider or network error). The refusal names the reason and the CI gate stays parked, so the run is not lost; approve again once the review completes, or use fix, skip, or abort. Once required reviews are complete, approval of unrelated CI failures retains the existing explicit-override behavior.
+
+CodeRabbit [documents a passing check titled `Review rate limited`](https://docs.coderabbit.ai/management/rate-limits) when no review ran.
+That name or output title vetoes completion even alongside another successful check at the same head.
+A separately named rate-limit check remains blocking while GitHub still returns it among the latest checks at that head; no-mistakes does not guess from comment text that the limit has cleared.
+The monitor never posts review commands, requests a paid review, or retries a review on the provider's behalf.
+
+Strict gating on GitLab and other forges is unsupported and parks with an explicit unsupported finding when enabled.
+GitLab approvals and discussion activity are not a documented CodeRabbit completion signal.
+GitHub Enterprise Server is also unsupported because its separately installed app has a different immutable identity.
+Leave this setting empty on those platforms to retain normal CI behavior.
+
+This gates no-mistakes readiness, not direct forge merges or merge-queue synthetic commits.
+The merge caller must recheck readiness for the current head and bind its merge request to that SHA.
+Configure forge protection separately if merges outside no-mistakes must be prevented.
+
 ### ci.revalidate_repairs
 
 Whether every CI repair must re-pass the pipeline before it is published, or only the ones whose continuity with the reviewed head cannot be proven.
@@ -829,7 +879,7 @@ With no trusted copy of this file, the operator's global value applies, then the
 
 ### ci.review_bot_comments
 
-When the CI step reads a supported review bot's (currently Greptile's) unresolved review comments.
+When the CI step reads a supported review bot's unresolved review comments. See the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for supported bots and identity verification.
 
 | | |
 |---|---|
@@ -842,18 +892,18 @@ ci:
   review_bot_comments: always
 ```
 
-- **`on_failure` (default)** reads them only when the bot's own check failed. A green bot check is green, whatever comments it left. This is the behavior before the key existed.
+- **`on_failure` (default)** reads them only when the bot's own check failed. A green bot check stays green unless a separate [`ci.required_reviews`](#cirequired_reviews) requirement applies.
 - **`always`** also reads them when the bot's check completed green on the current head, or has not registered on it yet once every other check is green, since the bot's threads from an earlier head can still be unresolved. Each unresolved comment becomes the same `ask-user` finding a red bot check produces, anchored to the comment's file and line, so the step parks for a decision instead of reporting `checks-passed`. A green bot with nothing unresolved is still green.
 
 A review bot can conclude its check `success` while leaving an unresolved comment. The comment most likely to be missed that way is the one on the pipeline's own CI repair commit, which no human has reviewed yet.
 
-Where the comments come from, and how the bot is identified, is provider-specific. On GitHub they are the bot's unresolved review-thread comments, and the bot is identified by the check suite's app slug. On GitLab they are the merge request's unresolved discussion notes, and the bot is identified by the login it comments as (Greptile posts there as `greptileai`); a GitLab job names no publishing application, so no GitLab check can be attributed to a bot.
+The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns provider-specific comment sources, bot identity verification, and prompt-safety handling.
 
 Under `always`:
 
 - Comments are read only once every check on the current head has completed green, the bot's included when it has registered one, so a review still being posted is not raced. A bot that has not registered a check on the head yet has its comments read too, since its threads from an earlier head can still be unresolved. A head with no checks at all under trusted [`no_ci: true`](#no_ci) has them read the same way before it is reported ready. Only unresolved threads count, and the same per-gate bound applies as for a red check. A GitLab note counts only when it is resolvable, unresolved, not a system note, and authored by a registered bot, so an ordinary merge request comment is never a finding.
-- The findings never spend an `auto_fix.ci` attempt. A human decides: approve, skip, or select comments for a fix round.
-- Approving over them records the CI step as passed with an override naming the comments, never as a clean pass.
+- The findings never spend an `auto_fix.ci` attempt. A human can select comments for a fix round or skip; approval is subject to [`ci.required_reviews`](#cirequired_reviews).
+- When approval is allowed, approving over comments records the CI step as passed with an override naming the comments, never as a clean pass.
 - A comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision.
 - Each green poll costs one more provider read for the comments.
 

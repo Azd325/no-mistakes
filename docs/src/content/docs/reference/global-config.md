@@ -89,6 +89,7 @@ ci:
   rebase_behind: false
   carry_review_on_replay: false
   release_after_checks_pass: false
+  required_reviews: []
 
 rebase:
   strategy: rebase # or: merge
@@ -829,7 +830,7 @@ Accepts any positive Go `time.ParseDuration` string. Global-only: there is no ma
 
 ### gate_reconcile_timeout
 
-Maximum wall time one parked approval-gate reconcile attempt may spend before the attempt stops, the gate stays parked, and the next interval wait begins. Covers host probes such as `gh auth status` that can hang without returning.
+Maximum wall time one parked approval-gate reconcile attempt may spend before the attempt stops, the gate stays parked, and the next interval wait begins. Covers host probes such as `gh auth status` that can hang without returning. The same bound applies to the live verification an approve response runs at a parked CI gate; a verification that times out counts as unverifiable, so it is refused while a [`ci.required_reviews`](/no-mistakes/reference/repo-config/#cirequired_reviews) requirement applies and otherwise recorded as an explicit override.
 
 |         |                        |
 | ------- | ---------------------- |
@@ -992,6 +993,12 @@ Each rerun is another provider-side workflow run billed to the repository being 
 Set `0` here to never spend someone else's CI minutes; this is the only place to make that choice for a repository whose default branch you do not control.
 
 The per-repo [`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_transient) overrides this value and owns the classification, the trust boundary, and every case that skips the rerun.
+
+### ci.required_reviews
+
+The operator-level fallback for [`ci.required_reviews`](/no-mistakes/reference/repo-config/#cirequired_reviews).
+That reference owns supported reviewer profiles, completion evidence, and the trust boundary.
+Defaults to `[]`; the trusted repository list overrides it, including an explicit empty list.
 
 ### ci.revalidate_repairs
 

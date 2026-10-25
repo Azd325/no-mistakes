@@ -45,6 +45,9 @@ type approvalResponse struct {
 	addedFindings  []types.Finding
 	approvalReason string
 	coverageRound  *db.StepRound
+	// approvalOverride is the unresolved condition an accepted approval
+	// records, verified while the gate was still parked.
+	approvalOverride string
 	// ignoreFindingIDs is the validated decline list of a fix response. It is
 	// not dispatch input (the decline set is derived from the selection on
 	// read), but an accepted response that selects nothing still has to be
@@ -79,10 +82,11 @@ type Executor struct {
 	crashRetryRecovered bool
 
 	mu                     sync.Mutex
-	approvalCh             chan approvalResponse // buffered channel for approval responses
-	waiting                bool                  // true when blocked on approval
-	waitingStep            types.StepName        // which step is currently awaiting approval
-	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	approvalCh             chan approvalResponse  // buffered channel for approval responses
+	waiting                bool                   // true when blocked on approval
+	waitingStep            types.StepName         // which step is currently awaiting approval
+	waitingApprovalRefusal string                 // non-empty: why Approve is rejected at the waiting gate
+	waitingApprovalVerify  func() (string, error) // the parked step's ApprovalOverrideVerifier, nil when it has none
 	// waitingFindings and waitingStepResultID describe the parked gate: the
 	// findings payload it showed and the step result whose rounds record what
 	// earlier rounds of this step decided. A fix response is validated against
@@ -287,6 +291,20 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		addedFindings:  addedFindings,
 		approvalReason: approvalReason,
 		coverageRound:  coverageRound,
+	}
+	if action == types.ActionApprove && e.waitingApprovalVerify != nil {
+		unresolved, err := e.waitingApprovalVerify()
+		if errors.Is(err, ErrApprovalBlocked) {
+			e.mu.Unlock()
+			return RespondDispositions{}, &RespondRefusal{
+				Message: fmt.Sprintf("cannot approve %s: %v", step, err),
+				Help:    "The gate is still parked: let the required review complete at the current PR head, then approve again, or use fix, skip, or abort.",
+			}
+		}
+		if err != nil {
+			unresolved = fmt.Sprintf("could not verify: %v", err)
+		}
+		response.approvalOverride = unresolved
 	}
 	dispositions := RespondDispositions{}
 	if action == types.ActionFix {
@@ -772,6 +790,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingApprovalVerify = e.approvalVerifier(gate.step, reconcileCtx)
 	e.waitingFindings = gate.findings
 	e.waitingStepResultID = gate.stepResult.ID
 	e.waitingRoundID = gate.lastRoundID
@@ -820,7 +839,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	switch response.action {
 	case types.ActionApprove:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
-		if err := e.applyApprovalOverride(gate.step, reconcileCtx, gate.stepResult.ID, response.approvalReason); err != nil {
+		if err := e.applyApprovalOverride(gate.step, gate.stepResult.ID, response); err != nil {
 			return e.failRun(run, repo, err, ctx)
 		}
 		if err := completeRecoveredGate(); err != nil {
@@ -1647,6 +1666,7 @@ rounds:
 			e.waiting = true
 			e.waitingStep = stepName
 			e.waitingApprovalRefusal = approvalRefusal(stepName, effectiveFindings)
+			e.waitingApprovalVerify = e.approvalVerifier(step, sctx)
 			e.waitingFindings = effectiveFindings
 			e.waitingStepResultID = sr.ID
 			e.waitingRoundID = currentRoundID
@@ -1709,7 +1729,7 @@ rounds:
 				// Approved - execution already frozen in executionMS, reset phaseStart
 				// so the done label computes no additional elapsed.
 				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
-				if err := e.applyApprovalOverride(step, sctx, sr.ID, response.approvalReason); err != nil {
+				if err := e.applyApprovalOverride(step, sr.ID, response); err != nil {
 					return false, "", err
 				}
 				phaseStart = time.Now()
@@ -1880,17 +1900,11 @@ done:
 
 // applyApprovalOverride is the single place both ActionApprove sites (the
 // live wait in executeStep and the daemon-restart recovery path in Resume)
-// route through before completing a step on approval. For a step implementing
-// ApprovalOverrideVerifier, this asks whether the completion needs an explicit
-// override (db.SetStepOverrideReason) instead of a silent plain pass. CI
-// re-checks its live condition; Test inspects the configured-command result
-// persisted when its gate parked. See ApprovalOverrideVerifier's doc for the
-// full contract. It never blocks or changes the approval itself: a human's
-// ActionApprove always proceeds, and a step that does not implement the
-// interface (today: every step but CI and Test) is completely unaffected. A
-// verification error fails closed - it is recorded as an unresolved condition,
-// not silently treated as clear - but still never stops
-// the approval, only what it gets recorded as.
+// route through before completing a step on approval. It records the
+// unresolved condition RespondWithOverrides verified while the gate was parked
+// (db.SetStepOverrideReason), so the completion is an explicit override instead
+// of a silent plain pass. ApprovalOverrideVerifier owns the error and refusal
+// contract.
 //
 // Persisting that override marker is itself fail-closed: downstream consumers
 // derive each step's override status from its durable override/approval reasons,
@@ -1898,30 +1912,43 @@ done:
 // pass - the exact false-green this feature exists to prevent. When the marker
 // cannot be written this returns the error so the caller fails the run closed
 // instead of recording that plain pass.
-func (e *Executor) applyApprovalOverride(step Step, sctx *StepContext, stepResultID, approvalReason string) error {
+func (e *Executor) applyApprovalOverride(step Step, stepResultID string, response approvalResponse) error {
 	// Every Test approval keeps its reason; db.StepResult.TestOverrideReason
 	// decides from the parked evidence whether it qualifies completion. Keep
 	// it separate from the command-waiver enforcement marker.
 	if step.Name() == types.StepTest {
-		if err := e.db.SetTestApprovalReason(stepResultID, approvalReason); err != nil {
+		if err := e.db.SetTestApprovalReason(stepResultID, response.approvalReason); err != nil {
 			return err
 		}
 	}
+	if response.approvalOverride == "" {
+		return nil
+	}
+	if dbErr := e.db.SetStepOverrideReason(stepResultID, response.approvalOverride); dbErr != nil {
+		return fmt.Errorf("record approval override reason for step %s: %w", step.Name(), dbErr)
+	}
+	return nil
+}
+
+// approvalVerifier binds step's ApprovalOverrideVerifier to the parked gate's
+// context, bounded by gateReconcileTimeout like the gate's other live reads, or
+// returns nil when the step has none.
+func (e *Executor) approvalVerifier(step Step, sctx *StepContext) func() (string, error) {
 	verifier, ok := step.(ApprovalOverrideVerifier)
 	if !ok {
 		return nil
 	}
-	unresolved, err := verifier.VerifyApprovalOverride(sctx)
-	if err != nil {
-		unresolved = fmt.Sprintf("could not verify: %v", err)
+	return func() (string, error) {
+		timeout := e.gateReconcileTimeout
+		if timeout <= 0 {
+			timeout = defaultGateReconcileTimeout
+		}
+		verifyCtx, cancel := context.WithTimeout(sctx.Ctx, timeout)
+		defer cancel()
+		copyCtx := *sctx
+		copyCtx.Ctx = verifyCtx
+		return verifier.VerifyApprovalOverride(&copyCtx)
 	}
-	if unresolved == "" {
-		return nil
-	}
-	if dbErr := e.db.SetStepOverrideReason(stepResultID, unresolved); dbErr != nil {
-		return fmt.Errorf("record approval override reason for step %s: %w", step.Name(), dbErr)
-	}
-	return nil
 }
 
 // persistResponseDecision writes the durable decision a fix response reports,
