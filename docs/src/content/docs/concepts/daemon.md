@@ -86,7 +86,7 @@ As an independent safety layer, the daemon also refuses to bind the Unix socket 
 When a push arrives via the post-receive hook:
 
 1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`, or at `<root>/<runID>` when [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) names a directory for that repository. The placement is resolved once, at run creation, and recorded on the run, so editing the setting never retargets a run that already exists
-2. Starts the pipeline executor in that worktree
+2. Admits the pipeline executor in that worktree subject to [`max_concurrent_runs`](/no-mistakes/reference/global-config/#max_concurrent_runs)
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
 4. Cleans up the worktree when the run finishes (success or failure), subject to the retention rules below
 
@@ -114,11 +114,13 @@ An existing unit picks up the policy when `no-mistakes daemon start`, `restart`,
 
 If you push to the same branch while a run is already active, the daemon:
 
-1. Cancels the in-progress run (reason: "cancelled: superseded by new push")
+1. Cancels the earlier run, including one waiting in the queue (reason: "cancelled: superseded by new push")
 2. Waits for it to finish
-3. Starts a new run with the latest push
+3. Submits a new run with the latest push
 
-Pushes to different branches run concurrently.
+Runs on different branches can execute concurrently. See
+[`max_concurrent_runs`](/no-mistakes/reference/global-config/#max_concurrent_runs)
+for daemon-wide execution limits and queue behavior.
 
 This is another reason the daemon exists: branch-level coordination is easier to
 reason about in one long-lived process than inside independent hook invocations.

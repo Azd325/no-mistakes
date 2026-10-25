@@ -630,6 +630,20 @@ A hang cut by the default invocation budget can qualify. A non-default agent tim
 
 Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed or retried. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for the remainder of a run resumed after daemon recovery; a later agent crash fails that step normally. It does not continue a terminal run: [`axi retry`](/reference/cli/#axi-retry) is the separate manual continuation, using the shared `agent_invocation` cause and its own checkpoint proofs. Timeout cuts do not acquire that cause, and parser rejections remain terminal. It is global-only: repository config and environment variables cannot enable it.
 
+### max_concurrent_runs
+
+Opt-in cap on how many pipeline runs execute at once on this machine. When the cap is reached, newly submitted runs wait in the queue in submission order with their run row pending, and start as running runs finish, fail, or are cancelled, instead of all starting at once and competing for host memory and CPU.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | integer                |
+| Range   | `0` or greater         |
+| Default | `0` (unlimited)        |
+
+`0` or unset means unlimited. An admitted run holds its slot until its executor finishes, fails, or is cancelled, including while parked at an approval gate. Recovered parked runs use the same cap and wait for a slot before resuming. Cancelling a queued run removes it from the queue without starting or resuming it.
+
+Fresh queued runs do not survive a daemon restart and must be resubmitted. Recovered parked runs waiting for a slot remain recoverable across a clean shutdown. If the global configuration cannot be read, the daemon keeps the last successfully loaded cap. It is global-only: repository config cannot set it.
+
 ### agent_timeout
 
 Stall budget for one pipeline agent invocation that does not already have a more specific deadline.
