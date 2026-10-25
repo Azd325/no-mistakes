@@ -14,9 +14,9 @@ const (
 	PRAppendixMinimal = "minimal"
 )
 
-// AppendixMode reports the publication mode. An empty value is full, matching
-// repositories that have never set pr.appendix. Validation rejects every other
-// string at parse time.
+// AppendixMode reports the effective publication mode after config merging.
+// An empty value falls back to full when no layer selected a mode. Validation
+// rejects every other string at parse time.
 func (p PR) AppendixMode() string {
 	switch p.Appendix {
 	case PRAppendixCollapsed, PRAppendixMinimal, PRAppendixFull:

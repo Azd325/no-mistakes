@@ -63,7 +63,7 @@ disable_project_settings: true
 # Optional PR settings.
 # base_branch is read from the trusted default branch.
 # template, publish_intent, and appendix are trusted publication policy.
-# appendix defaults to full. collapsed and minimal shorten the generated tail.
+# See pr.appendix below for presentation modes and inheritance.
 # title_format is a repository convention and is read from this branch.
 pr:
   base_branch: develop
@@ -244,7 +244,7 @@ Use a repository Markdown template for the public narrative, followed by no-mist
 pr:
   template: .github/pull_request_template.md
   publish_intent: false # Optional; otherwise original Intent is still published.
-  appendix: collapsed # Optional; full (the default), collapsed, or minimal.
+  appendix: collapsed # Optional; see pr.appendix below.
 ```
 
 For example, commit this template and the configuration to the default branch:
@@ -305,8 +305,8 @@ Choose how much of the generated Risk, Testing, and Pipeline tail is visible aft
 | --- | --- |
 | Type | `string` |
 | Values | `full`, `collapsed`, `minimal` |
-| Default | `full` (missing or empty also preserves the default) |
-| Trust | This value comes from the trusted default branch regardless of `allow_repo_commands`, or from a matching machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-pr-publication-defaults) entry when the trusted value is unset |
+| Default | Missing or empty inherits machine-local defaults; see [appendix precedence](/no-mistakes/reference/global-config/#prappendix) |
+| Trust | Trusted default branch only, regardless of `allow_repo_commands`; the pushed branch cannot choose this mode |
 
 `full` is today's body: `## Risk Assessment`, `## Testing`, and `## Pipeline` follow the narrative, in that order.
 
@@ -1133,12 +1133,10 @@ Fields not set here inherit from global config and then the built-in defaults.
 | `test.evidence.commit_message` | `string` | Inherits from global (default `no-mistakes: evidence for {{.Branch}} (run {{.RunID}})`) |
 
 By default, test evidence is written to `<NM_HOME>/evidence/<run-id>`. Where it is stored locally and how long it is kept are global-only settings; see [`test.evidence`](/no-mistakes/reference/global-config/#testevidence).
-On GitHub.com/GHEC, supported image and video artifacts are uploaded to GitHub user-attachments when the PR is rendered unless `attach_media` is false and `store_in_repo` is also false.
-Uploads need the raw GitHub token from `gh auth token`, read once per PR render; if your `gh` sits behind a credential vault that prompts before it releases the token, set both to false so the PR step never asks for it.
 For GitHub repositories, set `store_in_repo: true` to also publish it to an orphan evidence branch in the code branch's push-target repository and link the artifacts from the PR body; evidence is never committed to the pushed branch, so it never reaches the default branch.
 `test.evidence.branch` is read ONLY from the trusted default-branch copy of this file, because it names a git ref the daemon pushes to; a pushed branch cannot redirect evidence commits.
 The other publication fields, including `test.evidence.commit_message`, are read from the pushed branch. The commit-message template shapes only the evidence commit subject and cannot select its target branch.
-See [global config](/no-mistakes/reference/global-config/#testevidence) for provider support, limits, validation, and fail-closed behavior.
+See [global config](/no-mistakes/reference/global-config/#testevidence) for attachment behavior, credential-vault opt-out guidance, provider support, limits, validation, and fail-closed behavior.
 
 ### providers.github.draft_pull_requests
 

@@ -53,6 +53,12 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 		"terminal reported a zero-sized grid",
 		"a live UI check silently becomes a fake",
 		`Mark a scenario "live": true ONLY when you drove it against the real product in this run`,
+		"Live describes execution, not tenant or production liveness",
+		"An actually executed local product or real SDK against a localhost emulator with synthetic inputs counts as live for that local scenario",
+		"it does not prove tenant, mailbox, Graph, or production behavior",
+		"Name the local surface and synthetic inputs in the scenario name and reason",
+		`An unexecuted tenant or production scenario stays "untested" with "live": false and a reason`,
+		`Both "pass" and "fail" require "live": true and evidence`,
 		"A unit test, a stub, a mock, a recorded fixture, or reading the code is NOT live",
 		// The agent owns workarounds to get each scenario live, and whatever
 		// it builds for that stays disposable and isolated.
@@ -103,6 +109,10 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 			Scenarios struct {
 				Items struct {
 					Properties struct {
+						Live struct {
+							Type        string `json:"type"`
+							Description string `json:"description"`
+						} `json:"live"`
 						Reason struct {
 							Description string `json:"description"`
 						} `json:"reason"`
@@ -113,6 +123,22 @@ func TestTestStep_PromptDerivesScenariosAndMarksLive(t *testing.T) {
 	}
 	if err := json.Unmarshal(ag.calls[0].JSONSchema, &schema); err != nil {
 		t.Fatalf("decode delivered evidence schema: %v", err)
+	}
+	live := schema.Properties.Scenarios.Items.Properties.Live
+	if live.Type != "boolean" {
+		t.Errorf("delivered schema's live type = %q, want boolean", live.Type)
+	}
+	for _, want := range []string{
+		"true ONLY when this scenario was driven against the real running product in this run",
+		"live describes execution, not tenant or production liveness",
+		"an actually executed local product or real SDK against a localhost emulator with synthetic inputs counts as live for that local scenario",
+		"not as tenant, mailbox, Graph, or production validation",
+		"a unit test, stub, mock, recorded fixture, or code reading is not live",
+		"pass and fail require live=true",
+	} {
+		if !strings.Contains(live.Description, want) {
+			t.Errorf("delivered schema's live description = %q, want it to contain %q", live.Description, want)
+		}
 	}
 	reason := schema.Properties.Scenarios.Items.Properties.Reason.Description
 	for _, want := range []string{
