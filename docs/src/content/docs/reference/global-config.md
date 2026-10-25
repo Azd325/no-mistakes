@@ -1227,6 +1227,26 @@ An invalid entry fails configuration loading, and a render failure at commit tim
 Trailers are added to Review, Test, Document, and Lint fix commits, operator-authorized repository gate repairs, and CI repair commits. Commits that no single invocation produced get none rather than a guessed agent: the Push step's catch-all commit, a CI repair retried after a protected-path refusal, and rebase or merge commits that an agent writes itself.
 A per-repo [`commit.trailers`](/no-mistakes/reference/repo-config/#committrailers) list or a matching [`repository_overrides`](#repository_overrides) entry replaces this list rather than extending it; an empty list clears it.
 
+### pr.appendix
+
+Machine-wide default for the generated PR evidence appendix:
+
+```yaml
+pr:
+  appendix: collapsed # full | collapsed | minimal
+```
+
+Precedence: a non-empty trusted repository `pr.appendix`, then a matching
+[`repository_overrides`](#machine-local-pr-publication-defaults) value, then this
+global value, then built-in `full`. An unset or empty value inherits the next
+layer. The pushed branch cannot choose the appendix mode, even with
+`allow_repo_commands: true`.
+
+All modes retain the pipeline attestation. See the repository
+[`pr.appendix`](/no-mistakes/reference/repo-config/#prappendix) reference for
+rendering behavior and provider caveats. Invalid modes fail config loading.
+`pr.template` and `pr.publish_intent` are not machine-wide settings.
+
 ### repository_overrides
 
 Machine-local settings scoped to one repository by remote host and full repository path.
@@ -1270,8 +1290,8 @@ repository_overrides:
 
 `pr.template` selects a repository-relative file, never local template contents. It uses the same [path and file validation](/no-mistakes/reference/repo-config/#prtemplate) as the repository setting, and its bytes are read only from the pinned trusted default-branch tree, never from the pushed branch or worktree.
 `pr.appendix` accepts `full`, `collapsed`, or `minimal` and can be set with or without `pr.template`; it uses the same [appendix and attestation behavior](/no-mistakes/reference/repo-config/#prappendix) as the repository setting. When template mode is active, author-edited narrative is preserved on later updates.
-For each field, a non-empty trusted repository value wins over the matching machine-local value. Leaving either unset retains existing behavior; an unset appendix defaults to `full`.
-These fields are available only under `repository_overrides`, not as machine-wide PR settings. `pr.publish_intent` remains trusted-repository-only.
+For `pr.template`, a non-empty trusted repository value wins over the matching machine-local value. For appendix inheritance, see [`pr.appendix` precedence](#prappendix).
+`pr.template` is available only under `repository_overrides`, not as a machine-wide PR setting. `pr.publish_intent` remains trusted-repository-only.
 
 #### Machine-local review and documentation guidance
 

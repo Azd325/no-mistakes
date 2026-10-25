@@ -63,7 +63,7 @@ disable_project_settings: true
 # Optional PR settings.
 # base_branch is read from the trusted default branch.
 # template, publish_intent, and appendix are trusted publication policy.
-# appendix defaults to full. collapsed and minimal shorten the generated tail.
+# See pr.appendix below for presentation modes and inheritance.
 # title_format is a repository convention and is read from this branch.
 pr:
   base_branch: develop
@@ -244,7 +244,7 @@ Use a repository Markdown template for the public narrative, followed by no-mist
 pr:
   template: .github/pull_request_template.md
   publish_intent: false # Optional; otherwise original Intent is still published.
-  appendix: collapsed # Optional; full (the default), collapsed, or minimal.
+  appendix: collapsed # Optional; see pr.appendix below.
 ```
 
 For example, commit this template and the configuration to the default branch:
@@ -305,8 +305,8 @@ Choose how much of the generated Risk, Testing, and Pipeline tail is visible aft
 | --- | --- |
 | Type | `string` |
 | Values | `full`, `collapsed`, `minimal` |
-| Default | `full` (missing or empty also preserves the default) |
-| Trust | This value comes from the trusted default branch regardless of `allow_repo_commands`, or from a matching machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-pr-publication-defaults) entry when the trusted value is unset |
+| Default | Missing or empty inherits machine-local defaults; see [appendix precedence](/no-mistakes/reference/global-config/#prappendix) |
+| Trust | Trusted default branch only, regardless of `allow_repo_commands`; the pushed branch cannot choose this mode |
 
 `full` is today's body: `## Risk Assessment`, `## Testing`, and `## Pipeline` follow the narrative, in that order.
 
