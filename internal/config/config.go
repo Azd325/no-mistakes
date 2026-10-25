@@ -1196,9 +1196,9 @@ type EvidenceRaw struct {
 	StoreInRepo *bool `yaml:"store_in_repo"`
 	// AttachMedia uploads image and video evidence to GitHub user-attachments
 	// when the PR body is rendered. It defaults on so default-config PRs stop
-	// citing local disk paths for screenshots; set false to opt out. The
-	// orphan-branch store (store_in_repo) is independent: when both are on,
-	// the PR body carries both the commit-pinned link and the attachment.
+	// citing local disk paths for screenshots; set false to opt out even when
+	// store_in_repo is true. The orphan-branch store is independent: when both
+	// are on, the PR body carries both the commit-pinned link and the attachment.
 	// Like store_in_repo, this is pushed-readable.
 	AttachMedia *bool   `yaml:"attach_media"`
 	Dir         *string `yaml:"dir"`
@@ -1804,12 +1804,12 @@ intent:
 # reviewers can open them; text artifacts stay inlined. Uploads need the raw
 # GitHub token from "gh auth token", read once per PR render; if your gh sits
 # behind a credential vault that prompts before it releases the token, set
-# attach_media and store_in_repo to false so the PR step never asks. Opt in to
-# store_in_repo to also publish the full directory to an orphan evidence branch
-# in the same repository and link it from the PR body. The evidence branch
-# shares no history with your code branches, so artifacts never enter the
-# pushed branch or the default branch. When both are on, the PR body carries
-# both the attachment and the commit-pinned link.
+# attach_media to false so the PR step never asks, even with store_in_repo on.
+# Opt in to store_in_repo to also publish the full directory to an orphan
+# evidence branch in the same repository and link it from the PR body. The
+# evidence branch shares no history with your code branches, so artifacts never
+# enter the pushed branch or the default branch. When both are on, the PR body
+# carries both the attachment and the commit-pinned link.
 #
 # no-mistakes reaps its own evidence rather than leaving that to an OS temp
 # directory timer: retention ages run directories out (default 14 days) and
