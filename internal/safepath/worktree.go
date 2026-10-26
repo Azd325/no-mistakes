@@ -26,14 +26,17 @@ func RedactWorktrees(text, runWorktree, worktreesRoot string) string {
 		text = replacePathPrefix(text, root, func(string) (int, string) { return 0, WorktreePlaceholder })
 	}
 	for _, root := range pathSpellings(worktreesRoot) {
+		// A single backslash separates only in text that spells the root
+		// with single backslashes; after "/" or "\\" it starts a JSON escape.
+		single := strings.Contains(root, `\`) && !strings.Contains(root, `\\`)
 		text = replacePathPrefix(text, root, func(rest string) (int, string) {
 			// <repo-id>/<run-id> names one run worktree; anything shorter
 			// still drops the repo id.
-			repoID := pathSegment(rest)
+			repoID := pathSegment(rest, single)
 			if repoID == 0 {
 				return 0, WorktreesPlaceholder
 			}
-			if runID := pathSegment(rest[repoID:]); runID > 0 {
+			if runID := pathSegment(rest[repoID:], single); runID > 0 {
 				return repoID + runID, WorktreePlaceholder
 			}
 			return repoID, WorktreesPlaceholder
@@ -43,13 +46,14 @@ func RedactWorktrees(text, runWorktree, worktreesRoot string) string {
 }
 
 // pathSegment returns the length of the separator plus path segment name at
-// the start of rest, or 0 when rest does not start with one.
-func pathSegment(rest string) int {
+// the start of rest, or 0 when rest does not start with one. A single
+// backslash counts as a separator only when singleBackslash is set.
+func pathSegment(rest string, singleBackslash bool) int {
 	sep := 0
 	switch {
 	case strings.HasPrefix(rest, `\\`):
 		sep = 2
-	case strings.HasPrefix(rest, "/"), strings.HasPrefix(rest, `\`):
+	case strings.HasPrefix(rest, "/"), singleBackslash && strings.HasPrefix(rest, `\`):
 		sep = 1
 	default:
 		return 0

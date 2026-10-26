@@ -68,15 +68,10 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 		sctx.Log(fmt.Sprintf("test evidence not published, linking local paths instead: %v", err))
 		return nil
 	}
-	// Without a resolvable NM_HOME only the run's own worktree is rewritten.
-	worktreesRoot := ""
-	if p, err := paths.New(); err == nil {
-		worktreesRoot = p.WorktreesDir()
-	}
 	result, err := evidence.Publish(sctx.Ctx, evidence.Request{
 		RepoDir:       sctx.WorkDir,
 		RunWorktree:   sctx.WorkDir,
-		WorktreesRoot: worktreesRoot,
+		WorktreesRoot: nmWorktreesRoot(),
 		PushURL:       resolvePushURL(sctx),
 		Branch:        sctx.Config.Test.Evidence.Branch,
 		Dir:           sctx.Config.Test.Evidence.Dir,
@@ -142,4 +137,14 @@ func joinURLPath(dir, rel string) string {
 		segments[i] = url.PathEscape(segment)
 	}
 	return strings.Join(segments, "/")
+}
+
+// nmWorktreesRoot is the NM_HOME worktrees root published text is redacted
+// against. Without a resolvable NM_HOME only the run's own worktree is
+// rewritten.
+func nmWorktreesRoot() string {
+	if p, err := paths.New(); err == nil {
+		return p.WorktreesDir()
+	}
+	return ""
 }
