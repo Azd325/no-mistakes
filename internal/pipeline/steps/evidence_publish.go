@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 )
@@ -67,13 +68,20 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 		sctx.Log(fmt.Sprintf("test evidence not published, linking local paths instead: %v", err))
 		return nil
 	}
+	// Without a resolvable NM_HOME only the run's own worktree is rewritten.
+	worktreesRoot := ""
+	if p, err := paths.New(); err == nil {
+		worktreesRoot = p.WorktreesDir()
+	}
 	result, err := evidence.Publish(sctx.Ctx, evidence.Request{
-		RepoDir:   sctx.WorkDir,
-		PushURL:   resolvePushURL(sctx),
-		Branch:    sctx.Config.Test.Evidence.Branch,
-		Dir:       sctx.Config.Test.Evidence.Dir,
-		Segments:  segments,
-		SourceDir: sourceDir,
+		RepoDir:       sctx.WorkDir,
+		RunWorktree:   sctx.WorkDir,
+		WorktreesRoot: worktreesRoot,
+		PushURL:       resolvePushURL(sctx),
+		Branch:        sctx.Config.Test.Evidence.Branch,
+		Dir:           sctx.Config.Test.Evidence.Dir,
+		Segments:      segments,
+		SourceDir:     sourceDir,
 		// The review conversation lives in this same directory but is NOT test
 		// evidence and must never be published: the operator's questions and
 		// answers would land on the orphan branch verbatim and permanently,
