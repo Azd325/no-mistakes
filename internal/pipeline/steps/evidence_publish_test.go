@@ -330,3 +330,21 @@ func TestPublishRunEvidence_NeverPublishesTheReviewConversation(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishRunEvidence_RedactsRunWorktreePaths(t *testing.T) {
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	sctx, remote := newEvidencePublishContext(t, "feature/add-login")
+	other := filepath.Join(nmHome, "worktrees", "ab12cd34ef56", "run-0", "out.log")
+	writeRunEvidence(t, sctx, map[string]string{
+		"cli-run.txt": "ran " + filepath.Join(sctx.WorkDir, "bin", "tool") + "\nsaw " + other + "\n",
+	})
+
+	if links := publishRunEvidence(sctx); links == nil {
+		t.Fatal("evidence did not publish")
+	}
+	got := gitCmd(t, remote, "cat-file", "-p", "refs/heads/no-mistakes/evidence:.no-mistakes/evidence/feature/add-login/cli-run.txt")
+	if want := "ran " + filepath.Join("{run-worktree}", "bin", "tool") + "\nsaw " + filepath.Join("{run-worktree}", "out.log"); got != want {
+		t.Errorf("published text = %q, want %q", got, want)
+	}
+}

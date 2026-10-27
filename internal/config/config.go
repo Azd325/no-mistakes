@@ -224,11 +224,17 @@ type GlobalConfig struct {
 	// survives on this machine. Global-only for the same reason as Eval: it
 	// describes local disk retention, never a repository policy, so no
 	// pushed branch may set it.
-	Worktree                  Worktree      `yaml:"-"`
-	CITimeout                 time.Duration `yaml:"-"`
-	StepQuietWarning          time.Duration `yaml:"-"`
-	AgentTimeout              time.Duration `yaml:"-"`
-	AgentCrashRetries         int           `yaml:"-"`
+	Worktree          Worktree      `yaml:"-"`
+	CITimeout         time.Duration `yaml:"-"`
+	StepQuietWarning  time.Duration `yaml:"-"`
+	AgentTimeout      time.Duration `yaml:"-"`
+	AgentCrashRetries int           `yaml:"-"`
+	// MaxConcurrentRuns caps how many pipeline runs may execute at once on
+	// this machine. A newly submitted run past the cap waits in the pending
+	// queue in submission order until a running run finishes, fails, or is
+	// cancelled. Zero (the default) means unlimited. Global-only: it admits
+	// this machine's daemon-wide execution, so no pushed branch may set it.
+	MaxConcurrentRuns         int           `yaml:"-"`
 	AgentTimeoutsConfigured   bool          `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
 	TestAgentTimeout          time.Duration `yaml:"-"`
@@ -267,6 +273,7 @@ type GlobalConfig struct {
 	// value still wins over it.
 	Rebase RebaseRaw
 	Commit GlobalCommitRaw
+	PR     GlobalPRRaw
 	Intent GlobalIntentRaw
 	Test   TestRaw
 	// Review carries the operator's own review guidance for every gated
@@ -306,6 +313,7 @@ type globalConfigRaw struct {
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
 	AgentCrashRetries         int                        `yaml:"agent_crash_retries"`
+	MaxConcurrentRuns         int                        `yaml:"max_concurrent_runs"`
 	ReviewAgentTimeout        string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout          string                     `yaml:"test_agent_timeout"`
 	AgentWorkingTimeout       string                     `yaml:"agent_working_timeout"`
@@ -317,6 +325,7 @@ type globalConfigRaw struct {
 	CI                        CIRaw                      `yaml:"ci"`
 	Rebase                    RebaseRaw                  `yaml:"rebase"`
 	Commit                    GlobalCommitRaw            `yaml:"commit"`
+	PR                        GlobalPRRaw                `yaml:"pr"`
 	Intent                    GlobalIntentRaw            `yaml:"intent"`
 	Test                      TestRaw                    `yaml:"test"`
 	Review                    OperatorReviewRaw          `yaml:"review"`
@@ -350,14 +359,22 @@ type ForgeProfile struct {
 type ForgeProfiles map[string]ForgeProfile
 
 // RepositoryOverride contains machine-local settings for one normalized remote.
-// Review and Document are additive guidance only: they are rendered alongside
-// the repository's trusted rules and can never replace or remove them.
+// Review, Document, and Test are additive guidance only: they are rendered
+// alongside the repository's trusted rules and can never replace or remove them.
 type RepositoryOverride struct {
 	Commit   GlobalCommitRaw            `yaml:"commit"`
 	PR       RepositoryPRRaw            `yaml:"pr"`
 	Commands map[string]CommandOverride `yaml:"commands"`
 	Review   OperatorReviewRaw          `yaml:"review"`
 	Document DocumentRaw                `yaml:"document"`
+	Test     RepositoryTestRaw          `yaml:"test"`
+}
+
+// RepositoryTestRaw is the test block a repository_overrides entry may set:
+// only the additive live-validation runbook, never a setting that steers
+// evidence publication or the gate.
+type RepositoryTestRaw struct {
+	Instructions string `yaml:"instructions"`
 }
 
 // OperatorReviewRaw is the review block the operator's global config may set,
@@ -365,6 +382,12 @@ type RepositoryOverride struct {
 // one parks the gate for a human and stays the repository's decision.
 type OperatorReviewRaw struct {
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
+}
+
+// GlobalPRRaw contains machine-wide PR presentation defaults.
+// Template and PublishIntent are deliberately not machine-wide settings.
+type GlobalPRRaw struct {
+	Appendix string `yaml:"appendix"`
 }
 
 // RepositoryPRRaw contains machine-local per-repository PR defaults.
@@ -511,9 +534,9 @@ type PRRaw struct {
 	// repository explicitly opts into pushed-branch settings with
 	// allow_repo_commands.
 	BaseBranch string `yaml:"base_branch"`
-	// Template, PublishIntent, and Appendix are repository-only publication
-	// policy. All three remain trusted-only even when allow_repo_commands is
-	// enabled. Appendix empty means full.
+	// Template, PublishIntent, and Appendix remain trusted-only even when
+	// allow_repo_commands is enabled. An empty Appendix inherits machine-local
+	// defaults, falling back to full.
 	Template      string `yaml:"template"`
 	PublishIntent *bool  `yaml:"publish_intent"`
 	Appendix      string `yaml:"appendix"`
@@ -714,6 +737,8 @@ type AutoFixRaw struct {
 // CIRaw is the YAML representation of CI-step settings.
 // Pointer fields distinguish "not set" (nil) from "set to 0" (disabled).
 type CIRaw struct {
+	RequiredReviews []string `yaml:"required_reviews"`
+
 	RerunTransient *int `yaml:"rerun_transient"`
 	// RevalidateRepairs is a pointer so an explicit `false` in a repository's
 	// config can override a global `true`, which a plain bool could not
@@ -732,6 +757,9 @@ type CIRaw struct {
 
 // CI holds the resolved CI-step settings.
 type CI struct {
+	// RequiredReviews names external reviewers whose completion gates readiness.
+	RequiredReviews []string
+
 	// RerunTransient is how many times the CI step may re-run a single check
 	// the provider reported as cancelled - the one terminal outcome it
 	// attributes to itself rather than to the job - before that check reaches
@@ -766,7 +794,7 @@ type CI struct {
 	// it is opt-in (see VISION.md).
 	RevalidateRepairs bool
 	// ReviewBotComments selects when the CI step reads a registered review
-	// bot's (scm.ReviewBots) unresolved review comments.
+	// bot's (scm.ReviewBotsFor) unresolved review comments.
 	//
 	// "on_failure" (default): only when the bot's check failed, so a green
 	// bot check never blocks checks-passed.
@@ -1181,9 +1209,9 @@ type EvidenceRaw struct {
 	StoreInRepo *bool `yaml:"store_in_repo"`
 	// AttachMedia uploads image and video evidence to GitHub user-attachments
 	// when the PR body is rendered. It defaults on so default-config PRs stop
-	// citing local disk paths for screenshots; set false to opt out. The
-	// orphan-branch store (store_in_repo) is independent: when both are on,
-	// the PR body carries both the commit-pinned link and the attachment.
+	// citing local disk paths for screenshots; set false to opt out even when
+	// store_in_repo is true. The orphan-branch store is independent: when both
+	// are on, the PR body carries both the commit-pinned link and the attachment.
 	// Like store_in_repo, this is pushed-readable.
 	AttachMedia *bool   `yaml:"attach_media"`
 	Dir         *string `yaml:"dir"`
@@ -1220,6 +1248,10 @@ type Test struct {
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	// RepositoryInstructions come from the repository_overrides entry matching
+	// the repository's remote and are rendered before, never instead of,
+	// Instructions.
+	RepositoryInstructions string
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -1531,6 +1563,11 @@ agent_timeout: "30m"
 # Requires unchanged head, base, config, clean worktree and evidence.
 agent_crash_retries: 0
 
+# Optional cap on how many pipeline runs execute at once on this machine.
+# Past the cap, newly submitted runs wait in submission order (pending)
+# until a running run finishes, fails, or is cancelled. 0 means unlimited.
+# max_concurrent_runs: 1
+
 # Optional cap for a turn that is still producing output or waiting on a live
 # child. Unset means no extension past agent_timeout. Must be at least
 # agent_timeout. The 10-minute quiet stop still ends a turn that goes idle.
@@ -1696,6 +1733,8 @@ auto_fix:
 # default branch overrides this value.
 ci:
   rerun_transient: 0
+  # Optional external review completion gate; repository reference owns support.
+  required_reviews: []
   # Whether EVERY CI repair must re-pass the whole pipeline before it is
   # published, or only the ones whose continuity with the reviewed head cannot
   # be proven. Defaults to false: a repair that descends from the reviewed head
@@ -1784,12 +1823,12 @@ intent:
 # reviewers can open them; text artifacts stay inlined. Uploads need the raw
 # GitHub token from "gh auth token", read once per PR render; if your gh sits
 # behind a credential vault that prompts before it releases the token, set
-# attach_media and store_in_repo to false so the PR step never asks. Opt in to
-# store_in_repo to also publish the full directory to an orphan evidence branch
-# in the same repository and link it from the PR body. The evidence branch
-# shares no history with your code branches, so artifacts never enter the
-# pushed branch or the default branch. When both are on, the PR body carries
-# both the attachment and the commit-pinned link.
+# attach_media to false so the PR step never asks, even with store_in_repo on.
+# Opt in to store_in_repo to also publish the full directory to an orphan
+# evidence branch in the same repository and link it from the PR body. The
+# evidence branch shares no history with your code branches, so artifacts never
+# enter the pushed branch or the default branch. When both are on, the PR body
+# carries both the attachment and the commit-pinned link.
 #
 # no-mistakes reaps its own evidence rather than leaving that to an OS temp
 # directory timer: retention ages run directories out (default 14 days) and
@@ -2688,6 +2727,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if !repoOnly.AutoFix.Gates.IsZero() {
 		return nil, fmt.Errorf("auto_fix.gates is repository-only; configure it on the trusted default branch")
 	}
+	if err := validatePRAppendix(raw.PR.Appendix); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 	if err := validateGlobalCommitRaw(raw.Commit); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
@@ -2698,6 +2740,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateWorktreeRaw(raw.Worktree); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if err := validateRequiredReviews(raw.CI.RequiredReviews); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateRebaseRaw(raw.Rebase); err != nil {
@@ -2772,6 +2817,10 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("agent_crash_retries must be between 0 and 3")
 	}
 	cfg.AgentCrashRetries = raw.AgentCrashRetries
+	if raw.MaxConcurrentRuns < 0 {
+		return nil, fmt.Errorf("max_concurrent_runs must be 0 or greater (0 means unlimited)")
+	}
+	cfg.MaxConcurrentRuns = raw.MaxConcurrentRuns
 	configuredTimeout := false
 	if raw.AgentTimeout != "" {
 		d, err := parsePositiveDuration("agent_timeout", raw.AgentTimeout)
@@ -2901,6 +2950,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.CI = raw.CI
 	cfg.Rebase = raw.Rebase
 	cfg.Commit = raw.Commit
+	cfg.PR = raw.PR
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
 	cfg.Providers = raw.Providers
@@ -3069,6 +3119,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
 	if err := validateGateFixLimits(cfg.AutoFix.Gates, cfg.Gates); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
+	if err := validateRequiredReviews(cfg.CI.RequiredReviews); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
 	if err := validateRebaseRaw(cfg.Rebase); err != nil {
@@ -3785,6 +3838,10 @@ func validateRebaseRaw(r RebaseRaw) error {
 // inverting the bound, and anything above MaxCIRerunTransient is capped so a
 // typo cannot keep a run polling one commit indefinitely.
 func applyCIOverrides(dst *CI, src *CIRaw) {
+	if src.RequiredReviews != nil {
+		dst.RequiredReviews = append([]string{}, src.RequiredReviews...)
+	}
+
 	if src.RerunTransient != nil {
 		dst.RerunTransient = min(max(*src.RerunTransient, 0), MaxCIRerunTransient)
 	}
@@ -3931,9 +3988,10 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	// repository's decision (see EvidenceRaw.LocalRoot).
 	applyEvidenceStorageOverrides(&test.Evidence, &global.Test.Evidence)
 	// The runbook describes ONE repository's product, so it is resolved from
-	// the repository only - never from global config, which has no repository
-	// to describe. repo here is the EffectiveRepoConfig result, so this value
-	// is already trusted-only.
+	// the repository only - never from top-level global config, which has no
+	// repository to describe (a matching repository_overrides entry adds its
+	// own as Test.RepositoryInstructions below). repo here is the
+	// EffectiveRepoConfig result, so this value is already trusted-only.
 	test.Prepare = repo.Test.Prepare
 	test.BaseAttribution = repo.Test.BaseAttribution
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
@@ -4000,6 +4058,9 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		if pr.Appendix == "" {
 			pr.Appendix = override.PR.Appendix
 		}
+	}
+	if pr.Appendix == "" {
+		pr.Appendix = global.PR.Appendix
 	}
 	if repo.PR.TitleFormat != nil {
 		pr.TitleFormat = *repo.PR.TitleFormat
@@ -4079,6 +4140,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		cfg.CommandOverrides = copyCommandOverrides(override.Commands)
 		cfg.Review.RepositoryPathInstructions = resolvePathInstructions(override.Review.PathInstructions)
 		cfg.Document.RepositoryInstructions = strings.TrimSpace(override.Document.Instructions)
+		cfg.Test.RepositoryInstructions = strings.TrimSpace(override.Test.Instructions)
 	}
 
 	if repo.Agent != "" {

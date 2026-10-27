@@ -258,6 +258,7 @@ Run the pipeline and decide on its findings as they come up:
     - `--action abort --reason "<why>"` records the user's decision that the parked gate fails. The reason is required.
       The round is recorded as declined, no fix round starts, nothing is approved, pushed or merged, and the run ends `failed` with the reason in the step and run errors. Saved commits, findings and evidence stay available, but the run's worktree is removed, so uncommitted edits in it are lost.
       Follow the output's `branch_sync.next_action` to get the branch back. It is the user's call, never yours: do not send it to get past a finding, and it is not `axi abort`, which cancels the run instead.
+    - Prefer `--instructions-file PATH` and `--add-finding-file PATH` for text containing backticks, quotes, or newlines. Write the exact text to a file and pass its path, without shell substitution. Alternatively `--instructions -` or `--add-finding -` reads stdin until EOF, cancellation, or `--wait` expiry (only one stdin input per response). Each file flag is exclusive with its inline flag; empty or whitespace-only file/stdin input is rejected.
     - `--add-finding '<json>'` (with `--action fix`) folds a finding you
       spotted yourself - one the pipeline did not surface - into the fix round,
       as a JSON finding object. Use it for a problem you noticed that is not in

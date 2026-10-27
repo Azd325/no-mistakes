@@ -438,13 +438,13 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		}
 		narrative := neutralizeAttestationMarkers(provider, content.Body)
 		appendix = appendIssuesSection(appendix, issuesSection(sctx, narrative))
-		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit)
+		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit, sctx.WorkDir, nmWorktreesRoot())
 	}
 	content, err := s.draftPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 	if err != nil {
 		return prContent{}, err
 	}
-	redacted := redactPRContent(content)
+	redacted := redactPRContent(content, sctx.WorkDir, nmWorktreesRoot())
 	// Component text is cleaned before it is budgeted, so redaction should not
 	// grow the body. If it does, the body was never fitted to the limit: refuse
 	// rather than send one the provider rejects or truncates.
@@ -456,14 +456,15 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	return redacted, nil
 }
 
-// redactPRContent removes the operator's home directory, and the control
-// characters gh rewrites on read, from the content about to be published.
+// redactPRContent removes the run worktree paths, the operator's home
+// directory, and the control characters gh rewrites on read, from the content
+// about to be published.
 // Ordinary drafts call it after length caps; neither step grows the text. Owned
 // composition calls it before its integrity guard and non-truncating size check
 // so publication cannot invalidate that guard.
-func redactPRContent(content prContent) prContent {
-	content.Title = safepath.RedactText(neutralizePRControls(content.Title))
-	content.Body = safepath.RedactText(neutralizePRControls(content.Body))
+func redactPRContent(content prContent, runWorktree, worktreesRoot string) prContent {
+	content.Title = safepath.RedactText(safepath.RedactWorktrees(neutralizePRControls(content.Title), runWorktree, worktreesRoot))
+	content.Body = safepath.RedactText(safepath.RedactWorktrees(neutralizePRControls(content.Body), runWorktree, worktreesRoot))
 	return content
 }
 

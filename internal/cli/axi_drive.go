@@ -1275,8 +1275,11 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 		FindingIDs:       findingIDs,
 		IgnoreFindingIDs: ignoreFindingIDs,
 		Instructions:     instructions,
-		AddedFindings:    added,
-		ApprovalReason:   approvalReason,
+		// axi is the agent-driver surface: its --instructions are the
+		// driving agent's fix guidance, never the user's own decision.
+		InstructionsFromDriver: len(instructions) > 0,
+		AddedFindings:          added,
+		ApprovalReason:         approvalReason,
 	}
 	if len(coverage) == 1 {
 		params.Coverage = coverage[0]
@@ -1531,7 +1534,7 @@ func successReportHelp(fixes []fixRow) []string {
 const legacyApprovalReasonRefusal = "an approval reason applies only to Test approval"
 
 func newAxiRespondCmd() *cobra.Command {
-	var action, step, findings, ignore, instructions, addFinding, reason, runID string
+	var action, step, findings, ignore, instructions, instructionsFile, addFinding, addFindingFile, reason, runID string
 	var autoYes bool
 	var wait time.Duration
 
@@ -1560,6 +1563,10 @@ func newAxiRespondCmd() *cobra.Command {
 			"the structured branch_sync next_action in the output. Unlike `axi abort`,\n" +
 			"which cancels whatever the run is doing, this records a rejection at one\n" +
 			"gate and is refused unless the run is parked there.\n\n" +
+			"Warning: inline text is expanded by your shell; backticks can execute commands\n" +
+			"and silently replace content. Use --instructions-file or --add-finding-file\n" +
+			"for text containing backticks, quotes, or newlines. Use --instructions - or --add-finding - to read\n" +
+			"stdin until EOF, cancellation, or --wait; file paths are literal (including '-').\n\n" +
 			"--wait bounds this hold (default 8m) so an agent harness with a 10-minute\n" +
 			"tool cap gets a structured return instead of an unbounded hang. Elapsed wait\n" +
 			"is not a failed run: inspect with axi status and reattach. A slow live daemon\n" +
@@ -1574,17 +1581,19 @@ func newAxiRespondCmd() *cobra.Command {
 				"auto_yes": autoYes,
 			}, func() error {
 				return runAxiRespond(cmd, respondArgs{
-					action:       action,
-					step:         step,
-					findings:     findings,
-					ignore:       ignore,
-					instructions: instructions,
-					addFinding:   addFinding,
-					reason:       reason,
-					runID:        strings.TrimSpace(runID),
-					runFlagSet:   cmd.Flags().Changed("run"),
-					autoYes:      autoYes,
-					wait:         wait,
+					action:           action,
+					step:             step,
+					findings:         findings,
+					ignore:           ignore,
+					instructions:     instructions,
+					instructionsFile: instructionsFile,
+					addFinding:       addFinding,
+					addFindingFile:   addFindingFile,
+					reason:           reason,
+					autoYes:          autoYes,
+					wait:             wait,
+					runID:            strings.TrimSpace(runID),
+					runFlagSet:       cmd.Flags().Changed("run"),
 				})
 			})
 		},
@@ -1594,26 +1603,30 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&step, "step", "", "step to respond to (default: the step awaiting approval)")
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
 	cmd.Flags().StringVar(&ignore, "ignore", "", "comma-separated finding IDs to decline (with --action fix); every finding the gate shows must be in --findings or --ignore unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined")
-	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
+	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to selected findings; '-' reads stdin (exclusive with --instructions-file)")
+	cmd.Flags().StringVar(&instructionsFile, "instructions-file", "", "read fix guidance from a file (exclusive with --instructions)")
 	cmd.Flags().StringVar(&reason, "reason", "", "reason preserved with a Test approval exception (--step test --action approve), and required with --action abort")
-	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
+	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix; '-' reads stdin (exclusive with --add-finding-file)")
+	cmd.Flags().StringVar(&addFindingFile, "add-finding-file", "", "read JSON finding object from a file (exclusive with --add-finding)")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path and Test unvalidated-work refusals require an explicit response, and an open review question requires `axi answer`")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
 
 type respondArgs struct {
-	action       string
-	step         string
-	findings     string
-	ignore       string
-	instructions string
-	addFinding   string
-	reason       string
-	runID        string
-	runFlagSet   bool
-	autoYes      bool
-	wait         time.Duration
+	action           string
+	step             string
+	findings         string
+	ignore           string
+	instructions     string
+	instructionsFile string
+	addFinding       string
+	addFindingFile   string
+	reason           string
+	autoYes          bool
+	wait             time.Duration
+	runID            string
+	runFlagSet       bool
 }
 
 func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
@@ -1644,6 +1657,29 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	}
 	if act == types.ActionCompleteCoverage && (ra.autoYes || ra.findings != "" || ra.ignore != "" || ra.instructions != "" || ra.addFinding != "" || ra.reason != "") {
 		return emitError(cmd, 2, "complete-coverage cannot approve subsequent gates or change findings")
+	}
+
+	instructionsStdin := cmd.Flags().Changed("instructions") && ra.instructions == "-"
+	findingStdin := cmd.Flags().Changed("add-finding") && ra.addFinding == "-"
+	if instructionsStdin && findingStdin {
+		return emitError(cmd, 2, "only one respond input may read stdin")
+	}
+	resolvedInstructions, err := resolveAxiRespondInput(driveCtx, cmd, "instructions", ra.instructions, ra.instructionsFile)
+	if err != nil {
+		if isAxiWaitElapsed(ctx, driveCtx, err) {
+			return emitAxiWaitElapsedForRun(cmd, ra.wait, ra.runID, respondCmd+" --action approve|fix|skip")
+		}
+		return emitError(cmd, 2, err.Error())
+	}
+	resolvedFinding, err := resolveAxiRespondInput(driveCtx, cmd, "add-finding", ra.addFinding, ra.addFindingFile)
+	if err != nil {
+		if isAxiWaitElapsed(ctx, driveCtx, err) {
+			return emitAxiWaitElapsedForRun(cmd, ra.wait, ra.runID, respondCmd+" --action approve|fix|skip")
+		}
+		return emitError(cmd, 2, err.Error())
+	}
+	if act != types.ActionFix && (cmd.Flags().Changed("instructions-file") || cmd.Flags().Changed("add-finding-file")) {
+		return emitError(cmd, 2, "--instructions-file and --add-finding-file apply only to --action fix")
 	}
 
 	var env *axiEnv
@@ -1735,18 +1771,21 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	var added []types.Finding
 
 	if act == types.ActionFix {
-		if len(findingIDs) == 0 && ra.addFinding == "" && len(ignoreIDs) == 0 {
+		if len(findingIDs) == 0 && resolvedFinding == "" && len(ignoreIDs) == 0 {
 			return emitError(cmd, 2, "--action fix requires --findings <id,...>, --ignore <id,...>, or --add-finding <json>",
 				"Run `no-mistakes axi status"+runFlag(ra.runID)+"` to list finding IDs")
 		}
-		if note := strings.TrimSpace(ra.instructions); note != "" && len(findingIDs) > 0 {
+		if strings.TrimSpace(resolvedInstructions) != "" && len(findingIDs) > 0 {
+			if !cmd.Flags().Changed("instructions-file") && ra.instructions != "-" {
+				resolvedInstructions = strings.TrimSpace(resolvedInstructions) // retain inline behavior
+			}
 			instructions = make(map[string]string, len(findingIDs))
 			for _, id := range findingIDs {
-				instructions[id] = note
+				instructions[id] = resolvedInstructions
 			}
 		}
-		if ra.addFinding != "" {
-			f, err := parseAddFinding(ra.addFinding)
+		if resolvedFinding != "" {
+			f, err := parseAddFinding(resolvedFinding)
 			if err != nil {
 				return emitError(cmd, 2, fmt.Sprintf("invalid --add-finding: %v", err),
 					`Expected a JSON object, e.g. {"description":"...","action":"auto-fix"}`)
